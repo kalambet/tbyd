@@ -42,6 +42,7 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32,
 	g, gCtx := errgroup.WithContext(ctx)
 
 	for i, text := range texts {
+		i, text := i, text // Capture loop variables for the goroutine.
 		g.Go(func() error {
 			vec, err := e.client.Embed(gCtx, e.model, text)
 			if err != nil {

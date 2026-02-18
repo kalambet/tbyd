@@ -2,9 +2,6 @@ package retrieval
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
-	"strings"
 	"time"
 )
 
@@ -17,14 +14,6 @@ type ContextChunk struct {
 	Score      float32
 	Tags       string
 	CreatedAt  time.Time
-}
-
-// IDLookup is an optional interface for VectorStore implementations that support
-// direct record lookup by ID without vector search. SQLiteStore implements this
-// via its DB() method. Backends that don't support it will fall back to a
-// full Search call in RetrieveByIDs.
-type IDLookup interface {
-	DB() *sql.DB
 }
 
 // Retriever combines embedding and vector search to find relevant context.
@@ -59,46 +48,12 @@ func (r *Retriever) RetrieveByIDs(ctx context.Context, ids []string) ([]ContextC
 		return nil, nil
 	}
 
-	// Fast path: if the store supports direct SQL lookups, use them.
-	if lookup, ok := r.store.(IDLookup); ok {
-		return r.retrieveByIDsSQL(ctx, lookup.DB(), ids)
-	}
-
-	// Fallback: not applicable for non-SQL backends.
-	// Future LanceDB implementation should add its own ID lookup method.
-	return nil, fmt.Errorf("ID lookup not supported by the current vector store")
-}
-
-func (r *Retriever) retrieveByIDsSQL(ctx context.Context, db *sql.DB, ids []string) ([]ContextChunk, error) {
-	queryArgs := make([]interface{}, len(ids))
-	for i, id := range ids {
-		queryArgs[i] = id
-	}
-
-	query := `SELECT id, source_id, source_type, text_chunk, created_at, tags
-		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
-
-	rows, err := db.QueryContext(ctx, query, queryArgs...)
+	records, err := r.store.GetByIDs(ctx, "context_vectors", ids)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var chunks []ContextChunk
-	for rows.Next() {
-		var c ContextChunk
-		var createdAt string
-		if err := rows.Scan(&c.ID, &c.SourceID, &c.SourceType, &c.Text, &createdAt, &c.Tags); err != nil {
-			return nil, err
-		}
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at for id %s: %w", c.ID, err)
-		}
-		c.CreatedAt = t
-		chunks = append(chunks, c)
-	}
-	return chunks, rows.Err()
+	return recordsToChunks(records), nil
 }
 
 func scoredToChunks(scored []ScoredRecord) []ContextChunk {
@@ -112,6 +67,21 @@ func scoredToChunks(scored []ScoredRecord) []ContextChunk {
 			Score:      s.Score,
 			Tags:       s.Tags,
 			CreatedAt:  s.CreatedAt,
+		}
+	}
+	return chunks
+}
+
+func recordsToChunks(records []Record) []ContextChunk {
+	chunks := make([]ContextChunk, len(records))
+	for i, r := range records {
+		chunks[i] = ContextChunk{
+			ID:         r.ID,
+			SourceID:   r.SourceID,
+			SourceType: r.SourceType,
+			Text:       r.TextChunk,
+			Tags:       r.Tags,
+			CreatedAt:  r.CreatedAt,
 		}
 	}
 	return chunks

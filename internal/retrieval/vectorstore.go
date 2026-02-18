@@ -1,6 +1,9 @@
 package retrieval
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // VectorStore is the interface for vector storage and similarity search backends.
 // The current implementation uses SQLite with brute-force cosine similarity.
@@ -24,6 +27,9 @@ type VectorStore interface {
 	// Search performs vector similarity search, returning the top-K most similar records.
 	// filter is an optional SQL-like predicate for metadata filtering (may be ignored).
 	Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error)
+
+	// GetByIDs returns records matching the given IDs from the given table.
+	GetByIDs(ctx context.Context, table string, ids []string) ([]Record, error)
 
 	// Delete removes a record by ID from the given table.
 	Delete(table string, id string) error

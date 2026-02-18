@@ -3,6 +3,7 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +69,26 @@ func TestEmbedBatch_CountMatches(t *testing.T) {
 	}
 	if len(vecs) != 3 {
 		t.Errorf("got %d vectors, want 3", len(vecs))
+	}
+}
+
+func TestEmbedBatch_OllamaError(t *testing.T) {
+	mock := &mockOllamaEmbedder{
+		embedFn: func(_ context.Context, _ string, text string) ([]float32, error) {
+			if text == "b" {
+				return nil, errors.New("embedding failed")
+			}
+			return makeVector(384), nil
+		},
+	}
+	e := NewEmbedder(mock, "nomic-embed-text")
+
+	_, err := e.EmbedBatch(context.Background(), []string{"a", "b", "c"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "embedding failed") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

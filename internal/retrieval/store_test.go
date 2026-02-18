@@ -137,6 +137,11 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
+	// Verify a second delete fails as the record is gone.
+	if err := s.Delete("context_vectors", "r1"); err == nil {
+		t.Error("expected error when deleting non-existent record, got nil")
+	}
+
 	results, err := s.Search("context_vectors", vec, 1, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)

@@ -1,11 +1,13 @@
 package retrieval
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -169,9 +171,43 @@ func (s *SQLiteStore) Count(table string) (int, error) {
 	return count, err
 }
 
-// DB returns the underlying *sql.DB. Used by Retriever for ID-based lookups.
-func (s *SQLiteStore) DB() *sql.DB {
-	return s.db
+// GetByIDs returns records matching the given IDs from the context_vectors table.
+func (s *SQLiteStore) GetByIDs(ctx context.Context, table string, ids []string) ([]Record, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	queryArgs := make([]interface{}, len(ids))
+	for i, id := range ids {
+		queryArgs[i] = id
+	}
+
+	query := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
+		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var records []Record
+	for rows.Next() {
+		var r Record
+		var blob []byte
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+		r.Embedding = decodeFloat32s(blob)
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at for id %s: %w", r.ID, err)
+		}
+		r.CreatedAt = t
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 // encodeFloat32s serializes a float32 slice to little-endian bytes.

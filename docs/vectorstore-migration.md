@@ -84,7 +84,9 @@ for i := 0; i < len(records); i += 1000 {
     if end > len(records) {
         end = len(records)
     }
-    err := lancedbStore.Insert("context_vectors", records[i:end])
+    if err := lancedbStore.Insert("context_vectors", records[i:end]); err != nil {
+        log.Fatalf("migration failed at batch %d: %v", i/1000, err)
+    }
 }
 ```
 
