@@ -113,6 +113,8 @@ func applyEnvOverrides(cfg *Config) {
 		case kInt:
 			if i, err := strconv.Atoi(raw); err == nil {
 				s.apply(cfg, i)
+			} else {
+				fmt.Fprintf(os.Stderr, "[WARN] could not parse integer from env var %s=%q: %v. Using default value.\n", s.env, raw, err)
 			}
 		}
 	}
