@@ -41,7 +41,7 @@ func New(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: 0,
 		},
 	}
 }
@@ -57,6 +57,9 @@ type modelEntry struct {
 
 // IsRunning returns true if the Ollama server responds to GET /api/tags with 200.
 func (c *Client) IsRunning(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
 	if err != nil {
 		return false
@@ -71,6 +74,9 @@ func (c *Client) IsRunning(ctx context.Context) bool {
 
 // ListModels returns the names of all models available in the local Ollama instance.
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -188,7 +194,7 @@ func (c *Client) Chat(ctx context.Context, model string, messages []Message, jso
 		Stream:   false,
 	}
 	if jsonSchema != nil {
-		cr.Format = "json"
+		cr.Format = jsonSchema
 	}
 
 	body, err := json.Marshal(cr)

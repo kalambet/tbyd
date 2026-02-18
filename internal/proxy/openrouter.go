@@ -35,7 +35,7 @@ func NewClient(apiKey string) *Client {
 		apiKey:  apiKey,
 		baseURL: defaultBaseURL,
 		httpClient: &http.Client{
-			Timeout: defaultTimeout,
+			Timeout: 0,
 		},
 		referer: "https://github.com/kalambet/tbyd",
 		title:   "tbyd",
@@ -126,7 +126,7 @@ func (c *Client) doChat(ctx context.Context, body []byte, timeout time.Duration)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		cancel()
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))

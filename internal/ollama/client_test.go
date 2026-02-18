@@ -159,8 +159,12 @@ func TestChat_JSONSchema(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 
-	if capturedFormat != "json" {
-		t.Errorf("format = %v, want %q", capturedFormat, "json")
+	formatMap, ok := capturedFormat.(map[string]any)
+	if !ok {
+		t.Fatalf("format = %T, want map (schema object)", capturedFormat)
+	}
+	if formatMap["type"] != "object" {
+		t.Errorf("format.type = %v, want %q", formatMap["type"], "object")
 	}
 
 	// Verify response is valid JSON.

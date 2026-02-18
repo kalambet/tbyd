@@ -38,7 +38,10 @@ type ProxyConfig struct {
 }
 
 func defaults() Config {
-	homeDir, _ := os.UserHomeDir()
+	dataDir := "tbyd-data" // fallback if home dir unavailable
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		dataDir = filepath.Join(homeDir, "Library", "Application Support", "tbyd")
+	}
 	return Config{
 		Server: ServerConfig{
 			Port:    4000,
@@ -51,7 +54,7 @@ func defaults() Config {
 			EmbedModel: "nomic-embed-text",
 		},
 		Storage: StorageConfig{
-			DataDir: filepath.Join(homeDir, "Library", "Application Support", "tbyd"),
+			DataDir: dataDir,
 		},
 		Proxy: ProxyConfig{
 			DefaultModel: "anthropic/claude-opus-4",

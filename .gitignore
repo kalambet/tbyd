@@ -1,4 +1,5 @@
 # Binaries
+/tbyd
 bin/
 *.exe
 *.exe~

@@ -38,6 +38,19 @@ func Open(dataDir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pinging database: %w", err)
+	}
+
+	// Limit to single connection to avoid "database is locked" errors.
+	db.SetMaxOpenConns(1)
+
+	// Set busy timeout so concurrent access waits briefly instead of failing immediately.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("setting busy timeout: %w", err)
+	}
 
 	// Enable WAL mode for better concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
@@ -178,7 +191,11 @@ func (s *Store) GetInteraction(id string) (Interaction, error) {
 	if err != nil {
 		return Interaction{}, err
 	}
-	i.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return Interaction{}, fmt.Errorf("parsing created_at: %w", err)
+	}
+	i.CreatedAt = t
 	return i, nil
 }
 
@@ -214,7 +231,11 @@ func (s *Store) GetRecentInteractions(limit int) ([]Interaction, error) {
 		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
 			return nil, err
 		}
-		i.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		i.CreatedAt = t
 		results = append(results, i)
 	}
 	return results, rows.Err()
@@ -283,7 +304,11 @@ func (s *Store) GetContextDoc(id string) (ContextDoc, error) {
 	if err != nil {
 		return ContextDoc{}, err
 	}
-	d.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return ContextDoc{}, fmt.Errorf("parsing created_at: %w", err)
+	}
+	d.CreatedAt = t
 	return d, nil
 }
 
@@ -304,7 +329,11 @@ func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID); err != nil {
 			return nil, err
 		}
-		d.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		d.CreatedAt = t
 		results = append(results, d)
 	}
 	return results, rows.Err()

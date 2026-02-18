@@ -13,6 +13,15 @@ import (
 	"time"
 )
 
+func testMessages(t *testing.T) json.RawMessage {
+	t.Helper()
+	msgs, err := json.Marshal([]map[string]string{{"role": "user", "content": "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msgs
+}
+
 func TestChat_Streaming(t *testing.T) {
 	sseData := "data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n"
 
@@ -26,7 +35,7 @@ func TestChat_Streaming(t *testing.T) {
 	c := NewClientWithBaseURL("test-key", srv.URL)
 	rc, err := c.Chat(context.Background(), ChatRequest{
 		Model:    "anthropic/claude-opus-4",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: testMessages(t),
 		Stream:   true,
 	})
 	if err != nil {
@@ -56,7 +65,7 @@ func TestChat_NonStreaming(t *testing.T) {
 	c := NewClientWithBaseURL("test-key", srv.URL)
 	rc, err := c.Chat(context.Background(), ChatRequest{
 		Model:    "anthropic/claude-opus-4",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: testMessages(t),
 		Stream:   false,
 	})
 	if err != nil {
@@ -87,7 +96,7 @@ func TestChat_AuthHeader(t *testing.T) {
 	c := NewClientWithBaseURL("test-key", srv.URL)
 	rc, err := c.Chat(context.Background(), ChatRequest{
 		Model:    "test",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: testMessages(t),
 	})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -117,7 +126,7 @@ func TestChat_RateLimit_Retry(t *testing.T) {
 	c := NewClientWithBaseURL("test-key", srv.URL)
 	rc, err := c.Chat(context.Background(), ChatRequest{
 		Model:    "test",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: testMessages(t),
 	})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -141,7 +150,7 @@ func TestChat_RateLimit_Exhausted(t *testing.T) {
 	c := NewClientWithBaseURL("test-key", srv.URL)
 	_, err := c.Chat(context.Background(), ChatRequest{
 		Model:    "test",
-		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		Messages: testMessages(t),
 	})
 	if err == nil {
 		t.Fatal("expected error after exhausted retries")
@@ -180,7 +189,7 @@ func TestChat_ContextCancellation(t *testing.T) {
 		c := NewClientWithBaseURL("test-key", srv.URL)
 		rc, err := c.Chat(ctx, ChatRequest{
 			Model:    "test",
-			Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+			Messages: testMessages(t),
 			Stream:   true,
 		})
 		if err != nil {
