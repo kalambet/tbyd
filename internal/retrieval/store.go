@@ -1,12 +1,12 @@
 package retrieval
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
 )
@@ -80,7 +80,9 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		return nil, nil
 	}
 
-	var results []ScoredRecord
+	h := &scoredHeap{}
+	heap.Init(h)
+
 	for rows.Next() {
 		var r Record
 		var blob []byte
@@ -100,18 +102,23 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		r.CreatedAt = t
 
 		score := cosineSimilarity(vector, r.Embedding, queryNorm)
-		results = append(results, ScoredRecord{Record: r, Score: score})
+		sr := ScoredRecord{Record: r, Score: score}
+
+		if h.Len() < topK {
+			heap.Push(h, sr)
+		} else if score > (*h)[0].Score {
+			(*h)[0] = sr
+			heap.Fix(h, 0)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating rows: %w", err)
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
-	})
-
-	if len(results) > topK {
-		results = results[:topK]
+	// Extract results in descending score order.
+	results := make([]ScoredRecord, h.Len())
+	for i := len(results) - 1; i >= 0; i-- {
+		results[i] = heap.Pop(h).(ScoredRecord)
 	}
 
 	return results, nil
@@ -271,4 +278,20 @@ func cosineSimilarity(a, b []float32, queryNorm float32) float32 {
 		return 0
 	}
 	return float32(dot / (float64(queryNorm) * bNorm))
+}
+
+// scoredHeap is a min-heap of ScoredRecord ordered by Score.
+// Used to maintain the top-K highest-scoring records during search.
+type scoredHeap []ScoredRecord
+
+func (h scoredHeap) Len() int            { return len(h) }
+func (h scoredHeap) Less(i, j int) bool  { return h[i].Score < h[j].Score }
+func (h scoredHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *scoredHeap) Push(x interface{}) { *h = append(*h, x.(ScoredRecord)) }
+func (h *scoredHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
