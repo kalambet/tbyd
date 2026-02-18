@@ -89,7 +89,7 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 	scanner := bufio.NewScanner(rc)
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Fprintf(w, "%s\n", line)
+        fmt.Fprintf(w, "data: %s\n\n", line)
 		flusher.Flush()
 	}
 }
