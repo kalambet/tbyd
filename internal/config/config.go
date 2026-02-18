@@ -5,40 +5,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Ollama  OllamaConfig  `toml:"ollama"`
-	Storage StorageConfig `toml:"storage"`
-	Proxy   ProxyConfig   `toml:"proxy"`
+	Server  ServerConfig
+	Ollama  OllamaConfig
+	Storage StorageConfig
+	Proxy   ProxyConfig
 }
 
 type ServerConfig struct {
-	Port    int `toml:"port"`
-	MCPPort int `toml:"mcp_port"`
+	Port    int
+	MCPPort int
 }
 
 type OllamaConfig struct {
-	BaseURL    string `toml:"base_url"`
-	FastModel  string `toml:"fast_model"`
-	DeepModel  string `toml:"deep_model"`
-	EmbedModel string `toml:"embed_model"`
+	BaseURL    string
+	FastModel  string
+	DeepModel  string
+	EmbedModel string
 }
 
 type StorageConfig struct {
-	DataDir string `toml:"data_dir"`
+	DataDir string
 }
 
 type ProxyConfig struct {
-	OpenRouterAPIKey string `toml:"openrouter_api_key"`
-	DefaultModel     string `toml:"default_model"`
+	OpenRouterAPIKey string
+	DefaultModel     string
 }
 
 func defaults() Config {
-	dataDir := "tbyd-data" // fallback if home dir unavailable
+	dataDir := "tbyd-data"
 	if homeDir, err := os.UserHomeDir(); err == nil {
 		dataDir = filepath.Join(homeDir, "Library", "Application Support", "tbyd")
 	}
@@ -62,11 +60,16 @@ func defaults() Config {
 	}
 }
 
-// Load reads configuration from TOML files, environment variables, and macOS Keychain.
-// Search order for config files: ~/.config/tbyd/config.toml, then ./tbyd.toml.
-// Environment variables override file values. Keychain is checked for the API key.
+// Load reads configuration from the platform-native backend, environment
+// variables, and macOS Keychain.
+//
+// On macOS the backend is UserDefaults (domain: com.tbyd.app).
+// On Linux the backend is a JSON file at $XDG_CONFIG_HOME/tbyd/config.json.
+//
+// Environment variables (TBYD_*) override backend values.
+// Keychain is checked for the API key as a final fallback.
 func Load() (Config, error) {
-	return load(keychainReader{})
+	return loadWith(newPlatformBackend(), keychainReader{})
 }
 
 // keychain abstracts Keychain access for testing.
@@ -74,52 +77,26 @@ type keychain interface {
 	Get(service, account string) (string, error)
 }
 
-func load(kc keychain) (Config, error) {
+func loadWith(b ConfigBackend, kc keychain) (Config, error) {
 	cfg := defaults()
 
-	// Try config file paths in order
-	for _, p := range configPaths() {
-		if _, err := os.Stat(p); err == nil {
-			if _, err := toml.DecodeFile(p, &cfg); err != nil {
-				return Config{}, fmt.Errorf("parsing config file %s: %w", p, err)
-			}
-			break
-		}
+	if err := applyBackend(&cfg, b); err != nil {
+		return Config{}, err
 	}
 
-	return finalize(cfg, kc)
-}
-
-// loadFromPath loads config from a specific file path. Used by tests.
-func loadFromPath(path string, kc keychain) (Config, error) {
-	cfg := defaults()
-
-	if _, err := os.Stat(path); err == nil {
-		if _, err := toml.DecodeFile(path, &cfg); err != nil {
-			return Config{}, fmt.Errorf("parsing config file %s: %w", path, err)
-		}
-	}
-
-	return finalize(cfg, kc)
-}
-
-func finalize(cfg Config, kc keychain) (Config, error) {
-	// Apply environment variable overrides
 	applyEnvOverrides(&cfg)
 
-	// Try macOS Keychain for API key if still empty
+	// Try macOS Keychain for API key if still empty.
 	if cfg.Proxy.OpenRouterAPIKey == "" {
 		if key, err := kc.Get("tbyd", "openrouter_api_key"); err == nil && key != "" {
 			cfg.Proxy.OpenRouterAPIKey = key
 		}
 	}
 
-	// Validate required fields
 	if cfg.Proxy.OpenRouterAPIKey == "" {
 		return Config{}, fmt.Errorf(
 			"missing required config: OpenRouter API key. " +
-				"Set it in config.toml (proxy.openrouter_api_key), " +
-				"environment variable TBYD_OPENROUTER_API_KEY, " +
+				"Set it via environment variable TBYD_OPENROUTER_API_KEY " +
 				"or macOS Keychain (service: tbyd, account: openrouter_api_key)",
 		)
 	}
@@ -127,61 +104,10 @@ func finalize(cfg Config, kc keychain) (Config, error) {
 	return cfg, nil
 }
 
-func configPaths() []string {
-	var paths []string
-
-	// XDG: ~/.config/tbyd/config.toml
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(homeDir, ".config", "tbyd", "config.toml"))
-	}
-
-	// Local fallback: ./tbyd.toml
-	paths = append(paths, "tbyd.toml")
-
-	return paths
-}
-
-func applyEnvOverrides(cfg *Config) {
-	if v := os.Getenv("TBYD_SERVER_PORT"); v != "" {
-		var port int
-		if _, err := fmt.Sscanf(v, "%d", &port); err == nil {
-			cfg.Server.Port = port
-		}
-	}
-	if v := os.Getenv("TBYD_SERVER_MCP_PORT"); v != "" {
-		var port int
-		if _, err := fmt.Sscanf(v, "%d", &port); err == nil {
-			cfg.Server.MCPPort = port
-		}
-	}
-	if v := os.Getenv("TBYD_OLLAMA_BASE_URL"); v != "" {
-		cfg.Ollama.BaseURL = v
-	}
-	if v := os.Getenv("TBYD_OLLAMA_FAST_MODEL"); v != "" {
-		cfg.Ollama.FastModel = v
-	}
-	if v := os.Getenv("TBYD_OLLAMA_DEEP_MODEL"); v != "" {
-		cfg.Ollama.DeepModel = v
-	}
-	if v := os.Getenv("TBYD_OLLAMA_EMBED_MODEL"); v != "" {
-		cfg.Ollama.EmbedModel = v
-	}
-	if v := os.Getenv("TBYD_STORAGE_DATA_DIR"); v != "" {
-		cfg.Storage.DataDir = v
-	}
-	if v := os.Getenv("TBYD_OPENROUTER_API_KEY"); v != "" {
-		cfg.Proxy.OpenRouterAPIKey = v
-	}
-	if v := os.Getenv("TBYD_PROXY_DEFAULT_MODEL"); v != "" {
-		cfg.Proxy.DefaultModel = v
-	}
-}
-
 // keychainReader reads from macOS Keychain via the security CLI.
 type keychainReader struct{}
 
 func (keychainReader) Get(service, account string) (string, error) {
-	// #nosec G204 — service and account are internal constants, not user input
 	out, err := keychainExec(service, account)
 	if err != nil {
 		return "", err

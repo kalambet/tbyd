@@ -32,7 +32,7 @@
   browser-extension/
   ```
 - Add `cmd/tbyd/main.go` with a placeholder `main()` that prints version and exits
-- Add `.gitignore` (Go standard + macOS + `.tbyd.toml` local override)
+- Add `.gitignore` (Go standard + macOS)
 - Add `Makefile` with targets: `build`, `run`, `test`, `lint`
 
 **Acceptance criteria:**
@@ -41,13 +41,25 @@
 
 ---
 
-## Issue 0.2 — Config loader (TOML)
+## Issue 0.2 — Config loader (platform-native backend)
 
-**Context:** All runtime settings (ports, model names, data paths, API keys) must be read from a config file. API keys must never be hardcoded.
+**Context:** All runtime settings (ports, model names, data paths, API keys) must be read from a platform-native config backend. API keys must never be hardcoded. On macOS, config is stored in UserDefaults (`com.tbyd.app` domain), which is shared with the SwiftUI app. On Linux, a JSON file at `$XDG_CONFIG_HOME/tbyd/config.json` is used. A `ConfigBackend` interface abstracts the platform differences.
 
 **Tasks:**
-- Create `internal/config/config.go`
-- Define `Config` struct with fields:
+- Create `internal/config/backend.go` — define `ConfigBackend` interface:
+  ```go
+  type ConfigBackend interface {
+      GetString(key string) (val string, ok bool, err error)
+      GetInt(key string) (val int, ok bool, err error)
+      SetString(key, val string) error
+      SetInt(key string, val int) error
+      Delete(key string) error
+  }
+  ```
+- Create `internal/config/backend_darwin.go` — `darwinBackend` using `defaults read/write com.tbyd.app`
+- Create `internal/config/backend_other.go` — `fileBackend` using flat JSON in XDG config dir
+- Create `internal/config/keys.go` — key specs table mapping flat keys (e.g. `"server.port"`) to `Config` struct fields, types, and env var names. Secrets are flagged and never read from the backend
+- Create `internal/config/config.go` — `Config` struct, `defaults()`, `Load()`:
   ```go
   type Config struct {
     Server   ServerConfig
@@ -56,28 +68,10 @@
     Proxy    ProxyConfig
     Log      LogConfig
   }
-  type ServerConfig struct {
-    Port int    // default 4000
-    MCPPort int // default 4001
-  }
-  type OllamaConfig struct {
-    BaseURL    string // default "http://localhost:11434"
-    FastModel  string // default "phi3.5"
-    DeepModel  string // default "mistral-nemo"
-    EmbedModel string // default "nomic-embed-text"
-  }
-  type StorageConfig struct {
-    DataDir string // default "$HOME/Library/Application Support/tbyd"
-  }
-  type ProxyConfig struct {
-    OpenRouterAPIKey  string
-    DefaultModel      string // e.g. "anthropic/claude-opus-4"
-  }
   ```
-- Load from `~/.config/tbyd/config.toml` (XDG) with fallback to `./tbyd.toml`
+  Load order: code defaults → backend overlay (skip secrets) → env overrides → Keychain fallback for API key
 - Override any field from environment variables (e.g. `TBYD_OPENROUTER_API_KEY`)
-- Add `config.toml.example` to repo root with all fields documented
-- Store `OpenRouterAPIKey` in macOS Keychain via `security` CLI on first run; read from Keychain at runtime (fallback to env var)
+- Store `OpenRouterAPIKey` in macOS Keychain via `security` CLI; read from Keychain at runtime (fallback to env var)
 - On first run, generate a random 256-bit API token and store in Keychain under `tbyd-api-token`
 - Add `GetAPIToken() (string, error)` to config that reads from Keychain
 - Add `LogConfig` to `Config` struct:
@@ -87,17 +81,26 @@
   }
   ```
 
+**Setting config values (macOS):**
+```bash
+defaults write com.tbyd.app server.port -int 4000
+defaults write com.tbyd.app ollama.base_url -string "http://localhost:11434"
+defaults read com.tbyd.app   # view all settings
+```
+
 **Unit tests** (`internal/config/config_test.go`):
-- `TestDefaults` — load with empty config file; verify all defaults are applied correctly
-- `TestEnvOverride` — set `TBYD_OPENROUTER_API_KEY` env var; verify it overrides config file value
+- `TestDefaults` — load with empty backend; verify all defaults are applied correctly
+- `TestBackendOverride` — populate mock backend with all fields; verify each is read correctly
+- `TestEnvOverride` — set `TBYD_OPENROUTER_API_KEY` env var; verify it overrides backend value
 - `TestMissingRequiredField` — load with no API key anywhere; verify error message mentions the missing field
-- `TestTOMLParsing` — load from a temp file with all fields set; verify each field is read correctly
-- `TestKeychainFallback` — mock `security` CLI; verify Keychain read is attempted before env var
+- `TestKeychainFallback` — mock keychain; verify Keychain read is attempted when API key is missing
+- `TestSecretNotReadFromBackend` — put API key in backend; verify it is not read (secrets never come from backend)
 - `TestAPITokenGenerated` — first call generates token; second call returns same token
 
 **Acceptance criteria:**
-- Config loads without error from example file
-- Missing required fields (API key) produce a clear error message pointing user to docs
+- Config loads without error when backend + env + keychain provide required values
+- Missing required fields (API key) produce a clear error message
+- Secrets are never stored in or read from UserDefaults/JSON backend
 - `go test ./internal/config/...` passes
 
 ---

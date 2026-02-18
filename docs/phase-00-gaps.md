@@ -6,28 +6,28 @@
 
 ## Issue 00.1 — Add `LogConfig` to config
 
-**Context:** The updated spec requires a `[log]` config section. The `config.toml.example` already has it, but the Go struct and env override are missing.
+**Context:** The updated spec requires a log level config. Config is now stored in platform-native backends (UserDefaults on macOS, XDG JSON on Linux) — not TOML files.
 
 **Tasks:**
 - Add `LogConfig` struct to `internal/config/config.go`:
   ```go
   type LogConfig struct {
-      Level string `toml:"level"` // default "info"
+      Level string // default "info"
   }
   ```
 - Add `Log LogConfig` field to `Config` struct
 - Set default `Level: "info"` in `defaults()`
-- Add env override: `TBYD_LOG_LEVEL`
+- Add key spec in `keys.go`: key `"log.level"`, env `TBYD_LOG_LEVEL`
 - Initialize `log/slog` in `main.go` based on `cfg.Log.Level` (use `slog.LevelInfo` / `slog.LevelDebug`)
 
 **Tests** (`internal/config/config_test.go`):
-- `TestDefaults_LogLevel` — load empty config; verify `Log.Level == "info"`
-- `TestTOMLParsing_LogLevel` — config with `[log] level = "debug"`; verify parsed correctly
+- `TestDefaults_LogLevel` — load with empty backend; verify `Log.Level == "info"`
+- `TestBackendOverride_LogLevel` — set `"log.level"` in mock backend to `"debug"`; verify parsed correctly
 - `TestEnvOverride_LogLevel` — set `TBYD_LOG_LEVEL=debug`; verify override applied
 
 **Acceptance criteria:**
 - `go test ./internal/config/...` passes with new tests
-- `--debug` flag or `[log] level = "debug"` produces debug-level output
+- `defaults write com.tbyd.app log.level -string debug` or `TBYD_LOG_LEVEL=debug` produces debug-level output
 
 ---
 
@@ -213,7 +213,7 @@
 4. Database opened with new migration has all tables: `interactions` (with `status`), `user_profile`, `context_docs`, `context_vectors`, `jobs`
 5. Indexes confirmed on `interactions` and `context_vectors` and `jobs`
 6. API token generated on first run and readable on second run
-7. `[log] level = "debug"` produces debug output
+7. `defaults write com.tbyd.app log.level -string debug` produces debug output
 
 ---
 

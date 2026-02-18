@@ -103,12 +103,16 @@ for i := 0; i < len(records); i += 1000 {
 
 ### Step 4: Switch in config
 
-Add a config option to select the backend:
+Add config keys to select the backend (UserDefaults on macOS, XDG JSON on Linux):
 
-```toml
-[retrieval]
-backend = "lancedb"  # or "sqlite" (default)
-lancedb_url = "http://localhost:4002"
+```bash
+# macOS
+defaults write com.tbyd.app retrieval.backend -string "lancedb"
+defaults write com.tbyd.app retrieval.lancedb_url -string "http://localhost:4002"
+
+# Or via environment variables
+TBYD_RETRIEVAL_BACKEND=lancedb
+TBYD_RETRIEVAL_LANCEDB_URL=http://localhost:4002
 ```
 
 ### Step 5: Process lifecycle

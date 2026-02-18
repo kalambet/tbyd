@@ -60,15 +60,14 @@
   - `GetLikedEntries(since time.Time) ([]FeedlyEntry, error)` — GET `/v3/streams/contents?streamId=user/...%2Ftag%2Fglobal.must-reads`
   - `FeedlyEntry` struct: `{ID, Title, URL, Content, Published, Categories}`
   - OAuth token refresh logic (Feedly uses OAuth 2.0)
-- Add `[feedly]` config section:
-  ```toml
-  [feedly]
-  enabled = false
-  access_token = ""    # stored in Keychain
-  sync_interval = "6h"
-  sync_saved = true
-  sync_liked = false
+- Add Feedly config keys (stored in UserDefaults on macOS, XDG JSON on Linux):
   ```
+  feedly.enabled       = false       (bool)
+  feedly.sync_interval = "6h"        (string)
+  feedly.sync_saved    = true        (bool)
+  feedly.sync_liked    = false       (bool)
+  ```
+  Access token is stored in Keychain (secret, never in UserDefaults).
 - Create sync job in `internal/ingest/feedly_sync.go`:
   - `SyncJob` struct
   - `Run(ctx context.Context)` — pull new entries since last sync timestamp, POST each to `/ingest` with `source: "feedly"` and Feedly categories as tags

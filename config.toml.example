@@ -1,24 +1,26 @@
-# tbyd configuration
-# Copy this file to ~/.config/tbyd/config.toml and adjust values.
-# Environment variables (prefixed TBYD_) override file values.
-
-[server]
-# port = 4000            # HTTP API port
-# mcp_port = 4001        # MCP server port
-
-[ollama]
-# base_url = "http://localhost:11434"
-# fast_model = "phi3.5"
-# deep_model = "mistral-nemo"
-# embed_model = "nomic-embed-text"
-
-[storage]
-# data_dir = "$HOME/Library/Application Support/tbyd"
-
-[proxy]
-# Required: set via file, env (TBYD_OPENROUTER_API_KEY), or macOS Keychain.
-# openrouter_api_key = ""
-# default_model = "anthropic/claude-opus-4"
-
-[log]
-# level = "info"              # "info" or "debug"
+# tbyd configuration — DEPRECATED
+#
+# Config is now stored in platform-native backends:
+#   macOS:  UserDefaults (domain: com.tbyd.app)
+#   Linux:  $XDG_CONFIG_HOME/tbyd/config.json
+#
+# Set values on macOS:
+#   defaults write com.tbyd.app server.port -int 4000
+#   defaults write com.tbyd.app ollama.base_url -string "http://localhost:11434"
+#
+# Read values:
+#   defaults read com.tbyd.app
+#
+# Environment variables (TBYD_*) override stored values:
+#   TBYD_SERVER_PORT=4000
+#   TBYD_SERVER_MCP_PORT=4001
+#   TBYD_OLLAMA_BASE_URL=http://localhost:11434
+#   TBYD_OLLAMA_FAST_MODEL=phi3.5
+#   TBYD_OLLAMA_DEEP_MODEL=mistral-nemo
+#   TBYD_OLLAMA_EMBED_MODEL=nomic-embed-text
+#   TBYD_STORAGE_DATA_DIR=$HOME/Library/Application Support/tbyd
+#   TBYD_PROXY_DEFAULT_MODEL=anthropic/claude-opus-4
+#   TBYD_OPENROUTER_API_KEY=<your-key>
+#
+# Secrets (API keys) are stored in macOS Keychain, not UserDefaults:
+#   security add-generic-password -s tbyd -a openrouter_api_key -w "<your-key>"

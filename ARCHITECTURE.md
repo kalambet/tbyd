@@ -94,7 +94,7 @@ internal/composer/ ← prompt composition logic
 internal/storage/  ← SQLite wrappers (data + vectors)
 internal/proxy/    ← cloud LLM HTTP client (OpenRouter)
 internal/profile/  ← user profile management
-internal/config/   ← config file handling
+internal/config/   ← platform-native config (UserDefaults on macOS, XDG JSON on Linux)
 ```
 
 ### 2. API Surface — Three Entry Points
@@ -361,7 +361,7 @@ Profile schema:
 | Cloud gateway | OpenRouter | Single API for all cloud models |
 | macOS UI | SwiftUI + Share Extension | Native look/feel, system-level integration |
 | MCP implementation | Go MCP SDK (mark3labs/mcp-go) | Native MCP server for Claude Code |
-| Config format | TOML | Human-readable, simple, good Go support |
+| Config backend | UserDefaults (macOS) / XDG JSON (Linux) | Platform-native, shared with SwiftUI app |
 | Distribution | Single Go binary + Ollama prerequisite | Easy macOS install via Homebrew |
 
 ---
@@ -692,7 +692,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 
 ### Phase 0 — Foundation
 - [ ] **0.1** Go module init and project layout
-- [ ] **0.2** Config loader (TOML + Keychain for API keys)
+- [ ] **0.2** Config loader (UserDefaults + Keychain for API keys)
 - [ ] **0.3** SQLite storage: schema and migrations
 - [ ] **0.4** Ollama lifecycle manager
 - [ ] **0.5** OpenRouter HTTP client (passthrough)
@@ -779,7 +779,11 @@ tbyd/
 │   ├── ollama/
 │   │   └── client.go        ← Ollama lifecycle + API client
 │   └── config/
-│       └── config.go        ← TOML config loading
+│       ├── config.go        ← Config loading + keychain
+│       ├── backend.go       ← ConfigBackend interface
+│       ├── backend_darwin.go ← UserDefaults (com.tbyd.app)
+│       ├── backend_other.go  ← XDG JSON file backend
+│       └── keys.go          ← Key specs + env overrides
 ├── macos/                   ← SwiftUI macOS app (Xcode project)
 │   ├── App/
 │   │   ├── MenubarApp.swift
@@ -799,7 +803,7 @@ tbyd/
 │   └── architecture.md
 ├── go.mod
 ├── go.sum
-└── .tbyd.toml.example
+└── config.toml.example       ← Deprecated; documents env vars and defaults CLI
 ```
 
 ---
