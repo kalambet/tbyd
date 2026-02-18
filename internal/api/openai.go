@@ -47,6 +47,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 
 func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		defer r.Body.Close()
 
 		var req proxy.ChatRequest
@@ -70,8 +71,13 @@ func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 		if req.Stream {
 			streamResponse(w, rc)
 		} else {
+			body, err := io.ReadAll(rc)
+			if err != nil {
+				httpError(w, http.StatusBadGateway, "api_error", "reading upstream response: %v", err)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			io.Copy(w, rc)
+			w.Write(body)
 		}
 	}
 }
@@ -87,22 +93,27 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	scanner := bufio.NewScanner(rc)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Fprintf(w, "%s\n", line)
-		flusher.Flush()
-	}
-	if err := scanner.Err(); err != nil {
-		errPayload, marshalErr := json.Marshal(map[string]any{
-			"error": map[string]any{
-				"message": "upstream read error",
-				"type":    "server_error",
-			},
-		})
-		if marshalErr == nil {
-			fmt.Fprintf(w, "data: %s\n\n", errPayload)
+	reader := bufio.NewReader(rc)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			w.Write(line)
 			flusher.Flush()
+		}
+		if err != nil {
+			if err != io.EOF {
+				errPayload, marshalErr := json.Marshal(map[string]any{
+					"error": map[string]any{
+						"message": "upstream read error",
+						"type":    "server_error",
+					},
+				})
+				if marshalErr == nil {
+					fmt.Fprintf(w, "data: %s\n\n", errPayload)
+					flusher.Flush()
+				}
+			}
+			break
 		}
 	}
 }
