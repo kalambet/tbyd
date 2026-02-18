@@ -106,14 +106,7 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 }
 
 func hasMessages(raw json.RawMessage) bool {
-	if len(raw) == 0 {
-		return false
-	}
-	var arr []json.RawMessage
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		return false
-	}
-	return len(arr) > 0
+	return len(raw) > 2 && raw[0] == '[' && raw[len(raw)-1] == ']'
 }
 
 func httpError(w http.ResponseWriter, code int, format string, args ...any) {

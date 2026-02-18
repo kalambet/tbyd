@@ -64,7 +64,7 @@ func run() error {
 		Addr:    addr,
 		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
-			return ctx
+			return context.Background()
 		},
 	}
 
