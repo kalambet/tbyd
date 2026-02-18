@@ -3,6 +3,8 @@ package retrieval
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,32 +66,39 @@ func (r *Retriever) RetrieveByIDs(ctx context.Context, ids []string) ([]ContextC
 
 	// Fallback: not applicable for non-SQL backends.
 	// Future LanceDB implementation should add its own ID lookup method.
-	return nil, nil
+	return nil, fmt.Errorf("ID lookup not supported by the current vector store")
 }
 
 func (r *Retriever) retrieveByIDsSQL(ctx context.Context, db *sql.DB, ids []string) ([]ContextChunk, error) {
+	queryArgs := make([]interface{}, len(ids))
+	for i, id := range ids {
+		queryArgs[i] = id
+	}
+
+	query := `SELECT id, source_id, source_type, text_chunk, created_at, tags
+		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+
+	rows, err := db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	var chunks []ContextChunk
-	for _, id := range ids {
-		rows, err := db.QueryContext(ctx, `
-			SELECT id, source_id, source_type, text_chunk, created_at, tags
-			FROM context_vectors WHERE id = ?`, id)
-		if err != nil {
+	for rows.Next() {
+		var c ContextChunk
+		var createdAt string
+		if err := rows.Scan(&c.ID, &c.SourceID, &c.SourceType, &c.Text, &createdAt, &c.Tags); err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var c ContextChunk
-			var createdAt string
-			if err := rows.Scan(&c.ID, &c.SourceID, &c.SourceType, &c.Text, &createdAt, &c.Tags); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			t, _ := time.Parse(time.RFC3339, createdAt)
-			c.CreatedAt = t
-			chunks = append(chunks, c)
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at for id %s: %w", c.ID, err)
 		}
-		rows.Close()
+		c.CreatedAt = t
+		chunks = append(chunks, c)
 	}
-	return chunks, nil
+	return chunks, rows.Err()
 }
 
 func scoredToChunks(scored []ScoredRecord) []ContextChunk {

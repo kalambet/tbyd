@@ -61,6 +61,9 @@ func (s *SQLiteStore) Insert(table string, records []Record) error {
 
 // Search performs brute-force cosine similarity search over all vectors,
 // returning the top-K most similar records.
+// NOTE: the filter parameter is accepted for VectorStore interface compatibility
+// but is not yet implemented in the SQLite backend. A future LanceDB backend
+// will support DataFusion SQL predicates for metadata filtering.
 func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error) {
 	rows, err := s.db.Query(`
 		SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
@@ -114,7 +117,10 @@ func (s *SQLiteStore) Delete(table string, id string) error {
 	if err != nil {
 		return fmt.Errorf("deleting record %s: %w", id, err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if n == 0 {
 		return fmt.Errorf("record %s not found", id)
 	}
@@ -178,7 +184,11 @@ func encodeFloat32s(v []float32) []byte {
 }
 
 // decodeFloat32s deserializes little-endian bytes back to a float32 slice.
+// Panics if the byte slice length is not a multiple of 4 (indicates data corruption).
 func decodeFloat32s(b []byte) []float32 {
+	if len(b)%4 != 0 {
+		panic(fmt.Sprintf("byte slice length %d is not a multiple of 4", len(b)))
+	}
 	n := len(b) / 4
 	v := make([]float32, n)
 	for i := range v {

@@ -80,7 +80,10 @@ records, err := sqliteStore.ExportAll("context_vectors")
 
 // Import into LanceDB (in batches of 1000)
 for i := 0; i < len(records); i += 1000 {
-    end := min(i+1000, len(records))
+    end := i + 1000
+    if end > len(records) {
+        end = len(records)
+    }
     err := lancedbStore.Insert("context_vectors", records[i:end])
 }
 ```
