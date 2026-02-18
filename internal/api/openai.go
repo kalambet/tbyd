@@ -33,7 +33,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		models, err := p.ListModels(r.Context())
 		if err != nil {
-			httpError(w, http.StatusBadGateway, "failed to list models: %v", err)
+			httpError(w, http.StatusBadGateway, "api_error", "failed to list models: %v", err)
 			return
 		}
 
@@ -51,18 +51,18 @@ func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 
 		var req proxy.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpError(w, http.StatusBadRequest, "invalid request body: %v", err)
+			httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid request body: %v", err)
 			return
 		}
 
 		if !hasMessages(req.Messages) {
-			httpError(w, http.StatusBadRequest, "messages is required and must not be empty")
+			httpError(w, http.StatusBadRequest, "invalid_request_error", "messages is required and must not be empty")
 			return
 		}
 
 		rc, err := p.Chat(r.Context(), req)
 		if err != nil {
-			httpError(w, http.StatusBadGateway, "upstream error: %v", err)
+			httpError(w, http.StatusBadGateway, "api_error", "upstream error: %v", err)
 			return
 		}
 		defer rc.Close()
@@ -79,7 +79,7 @@ func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 func streamResponse(w http.ResponseWriter, rc io.Reader) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		httpError(w, http.StatusInternalServerError, "streaming not supported")
+		httpError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
 		return
 	}
 
@@ -106,17 +106,24 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 }
 
 func hasMessages(raw json.RawMessage) bool {
-	return len(raw) > 2 && raw[0] == '[' && raw[len(raw)-1] == ']'
+	if len(raw) == 0 {
+		return false
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return false
+	}
+	return len(arr) > 0
 }
 
-func httpError(w http.ResponseWriter, code int, format string, args ...any) {
+func httpError(w http.ResponseWriter, code int, errType string, format string, args ...any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	msg := fmt.Sprintf(format, args...)
 	json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
 			"message": msg,
-			"type":    "invalid_request_error",
+			"type":    errType,
 			"code":    code,
 		},
 	})
