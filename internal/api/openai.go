@@ -13,8 +13,7 @@ import (
 )
 
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
-// REST API in passthrough mode. The pipeline parameter is reserved for future
-// enrichment and may be nil.
+// REST API in passthrough mode.
 func NewOpenAIHandler(p *proxy.Client) http.Handler {
 	r := chi.NewRouter()
 
