@@ -47,14 +47,11 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 
 func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
 		var req proxy.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            r.Body.Close()
-            httpError(w, http.StatusBadRequest, "invalid request body: %v", err)
-            return
-        }
-        defer r.Body.Close()
+			httpError(w, http.StatusBadRequest, "invalid request body: %v", err)
 			return
 		}
 
@@ -93,7 +90,11 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 	scanner := bufio.NewScanner(rc)
 	for scanner.Scan() {
 		line := scanner.Text()
-        fmt.Fprintf(w, "data: %s\n\n", line)
+		fmt.Fprintf(w, "%s\n", line)
+		flusher.Flush()
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"upstream read error\",\"type\":\"server_error\"}}\n\n")
 		flusher.Flush()
 	}
 }
