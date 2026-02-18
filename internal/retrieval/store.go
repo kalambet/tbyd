@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -111,7 +112,7 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 			return nil, fmt.Errorf("decoding embedding for %s: %w", id, err)
 		}
 
-		score := dotProduct(vector, buf, queryNorm)
+		score := cosineSimilarity(vector, buf, queryNorm)
 		if h.Len() < topK {
 			heap.Push(h, idScore{ID: id, Score: score})
 		} else if score > (*h)[0].Score {
@@ -181,11 +182,9 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 
 // sortByScore sorts ScoredRecords by Score descending. Used for small slices (topK).
 func sortByScore(results []ScoredRecord) {
-	for i := 1; i < len(results); i++ {
-		for j := i; j > 0 && results[j].Score > results[j-1].Score; j-- {
-			results[j], results[j-1] = results[j-1], results[j]
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
 }
 
 // Delete removes a record by ID from the context_vectors table.
@@ -343,9 +342,9 @@ func norm(v []float32) float32 {
 	return float32(math.Sqrt(sum))
 }
 
-// dotProduct computes cosine similarity as dot(a,b) / (aNorm * bNorm).
+// cosineSimilarity computes cosine similarity as dot(a,b) / (aNorm * bNorm).
 // aNorm is the precomputed L2 norm of vector a.
-func dotProduct(a, b []float32, aNorm float32) float32 {
+func cosineSimilarity(a, b []float32, aNorm float32) float32 {
 	if len(a) != len(b) {
 		return 0
 	}
@@ -378,17 +377,4 @@ func (h *idScoreHeap) Pop() interface{} {
 	return item
 }
 
-// scoredHeap is a min-heap of ScoredRecord ordered by Score.
-type scoredHeap []ScoredRecord
 
-func (h scoredHeap) Len() int            { return len(h) }
-func (h scoredHeap) Less(i, j int) bool  { return h[i].Score < h[j].Score }
-func (h scoredHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *scoredHeap) Push(x interface{}) { *h = append(*h, x.(ScoredRecord)) }
-func (h *scoredHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
-	return item
-}
