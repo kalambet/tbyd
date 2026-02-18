@@ -16,6 +16,7 @@
     - Register context menu items: "Save to tbyd", "Save selection to tbyd"
     - Handle `chrome.contextMenus.onClicked`: POST to `http://localhost:4000/ingest`
     - Store server URL in `chrome.storage.local` (configurable)
+    - Store the bearer token (from Keychain / initial setup) in `chrome.storage.local`; include `Authorization: Bearer <token>` on all requests to localhost
   - `popup/` — extension toolbar popup:
     - "Save current page" button
     - Tags input field
@@ -37,6 +38,7 @@
 - `background.test.js / TestTagsParsed` — simulate save with tags "go,privacy"; verify POST body has `tags: ["go", "privacy"]`
 - `popup.test.js / TestStatusCheck` — mock fetch to `/health`; verify status indicator shows "running" on 200
 - `popup.test.js / TestStatusCheck_Offline` — mock fetch failure; verify "not running" state
+- `background.test.js / TestAuth_HeaderIncluded` — verify all fetch calls to localhost include the `Authorization: Bearer <token>` header
 
 **Acceptance criteria:**
 - In Chrome: right-click on selected text → "Save selection to tbyd" → text stored in knowledge base
@@ -58,15 +60,14 @@
   - `GetLikedEntries(since time.Time) ([]FeedlyEntry, error)` — GET `/v3/streams/contents?streamId=user/...%2Ftag%2Fglobal.must-reads`
   - `FeedlyEntry` struct: `{ID, Title, URL, Content, Published, Categories}`
   - OAuth token refresh logic (Feedly uses OAuth 2.0)
-- Add `[feedly]` config section:
-  ```toml
-  [feedly]
-  enabled = false
-  access_token = ""    # stored in Keychain
-  sync_interval = "6h"
-  sync_saved = true
-  sync_liked = false
+- Add Feedly config keys (stored in UserDefaults on macOS, XDG JSON on Linux):
   ```
+  feedly.enabled       = false       (bool)
+  feedly.sync_interval = "6h"        (string)
+  feedly.sync_saved    = true        (bool)
+  feedly.sync_liked    = false       (bool)
+  ```
+  Access token is stored in Keychain (secret, never in UserDefaults).
 - Create sync job in `internal/ingest/feedly_sync.go`:
   - `SyncJob` struct
   - `Run(ctx context.Context)` — pull new entries since last sync timestamp, POST each to `/ingest` with `source: "feedly"` and Feedly categories as tags
@@ -105,8 +106,8 @@
 
 **Tasks:**
 - `internal/ingest/processor.go` upgrades:
-  - **URL extraction**: upgrade to a more robust readability implementation; strip nav, ads, footers; extract: title, author, published date, main body
-  - **PDF extraction**: use `github.com/dslipak/pdf` or `pdfcpu`; extract text per page; chunk if > 4000 tokens
+  - **URL extraction**: use `go-shiori/go-readability` for article extraction; strip nav, ads, footers; extract: title, author, published date, main body
+  - **PDF extraction**: use `pdfcpu` (preferred, actively maintained); extract text per page; chunk if > 4000 tokens
   - **HTML file**: same as URL extraction
   - **Markdown**: preserve as-is, extract frontmatter if present
   - **Image**: use macOS Vision framework via CGO or subprocess for OCR; extract text
@@ -114,7 +115,7 @@
 - Implement smart chunking for long documents:
   - Split at paragraph/section boundaries, not arbitrary character count
   - Overlap adjacent chunks by one paragraph for context continuity
-  - Each chunk stored as a separate LanceDB record with `source_doc_id` linking them
+  - Each chunk stored as a separate VectorStore record with `source_id` linking them to the parent `context_docs` entry
 - Add `internal/ingest/metadata.go`:
   - Extract metadata from processed content: `{word_count, reading_time_minutes, language, detected_topics[]}`
   - Store in `context_docs.metadata` JSON column
@@ -134,7 +135,7 @@
 **Unit tests** (`internal/ingest/processor_pdf_test.go`):
 - `TestProcessPDF_ExtractsText` — use a small test PDF fixture; verify non-empty text extracted
 - `TestProcessPDF_ChunksLongDocument` — PDF fixture > 4000 tokens; verify multiple chunks produced
-- `TestProcessPDF_AllChunksLinked` — verify all chunks share the same `source_doc_id`
+- `TestProcessPDF_AllChunksLinked` — verify all chunks share the same `source_id` linking to the parent `context_docs` entry
 
 **Acceptance criteria:**
 - A 50-page PDF is chunked into ~15-20 overlapping chunks, all retrievable
@@ -208,7 +209,7 @@
   - Configurable via CLI args; progress output; estimated time display
 - Create `internal/tuning/schedule.go`:
   - `Scheduler` struct
-  - `ScheduleNextTune()` — checks prerequisites, schedules fine-tuning for next available low-activity window (configurable, default: 2 AM if > 500 examples)
+  - `ScheduleNextTune()` — checks prerequisites, schedules fine-tuning for next available low-activity window (configurable, default: 2 AM if > 500 examples). Enqueues a `finetune` job in the SQLite job queue
   - `RunTuneJob(ctx context.Context)` — runs `finetune.py` as subprocess, monitors progress, handles errors
   - On completion: register new GGUF with Ollama via `ollama create tbyd-phi3.5-v<n> -f ./Modelfile`
   - Run quality check: compare old vs. new model on held-out eval examples

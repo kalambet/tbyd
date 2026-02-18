@@ -24,32 +24,45 @@
     }
     ```
   - Validate: `content` or `url` required; `source` required
+  - Require `Authorization: Bearer <token>` header (token from Keychain, generated in Phase 0)
   - For `type: "url"`: fetch URL content (readability-style extraction via `go-readability` or similar)
   - For `type: "file"`: accept base64-encoded content; detect MIME type; handle PDF (extract text), plain text, markdown
   - Generate a UUID for the doc, store in SQLite `context_docs`, queue for background enrichment
   - Return `{"id": "...", "status": "queued"}` immediately (non-blocking)
-- Create `internal/ingest/queue.go`:
-  - In-memory queue (buffered channel) for pending enrichment jobs
-  - Worker goroutine that processes jobs using the deep local model
-  - Retry failed jobs up to 3 times
+- Use the SQLite-backed job queue (from Phase 0) for durable background processing:
+  - On ingest: write doc to `context_docs`, enqueue an `ingest_enrich` job
+  - Worker picks up jobs from the `jobs` table, processes using local model
+  - Failed jobs are retried with exponential backoff (max 3 attempts)
+  - No data loss on process restart — pending jobs survive
+- Expose data browsing and profile management endpoints:
+  - `GET /profile` — return current profile JSON
+  - `PATCH /profile` — partial update (merge fields)
+  - `GET /interactions` — paginated list (when save_interactions enabled)
+  - `GET /interactions/:id` — single interaction
+  - `DELETE /interactions/:id` — hard delete from SQLite and VectorStore
+  - `GET /context-docs` — paginated list
+  - `DELETE /context-docs/:id` — hard delete from SQLite and VectorStore
+- All management endpoints require bearer token auth
 
 **Unit tests** (`internal/api/ingest_test.go`) — use `httptest.NewRecorder`, mock storage and queue:
 - `TestIngest_TextContent` — POST valid text payload; verify 200 and `{"status":"queued"}` returned; verify doc saved to mock store
 - `TestIngest_MissingSource` — omit `source`; verify 400 with descriptive error
 - `TestIngest_MissingContent` — omit both `content` and `url`; verify 400
+- `TestIngest_NoAuth` — POST without token; verify 401
+- `TestIngest_ValidAuth` — POST with correct token; verify 200
 - `TestIngest_URLType` — POST with `type: "url"` and a URL; mock HTTP fetch; verify fetched content stored
 - `TestIngest_FileBase64` — POST base64-encoded plain text file; verify decoded content stored
 - `TestIngest_QueuedImmediately` — verify response arrives before background processing completes (non-blocking)
 
-**Unit tests** (`internal/ingest/queue_test.go`):
-- `TestQueue_ProcessesJob` — enqueue a job; verify worker calls processor within 1s
-- `TestQueue_RetryOnFailure` — processor fails twice then succeeds; verify job processed on third attempt
-- `TestQueue_MaxRetriesExceeded` — processor always fails; verify job dropped after 3 attempts (no infinite loop)
-- `TestQueue_ConcurrentEnqueue` — enqueue 50 jobs from 5 goroutines concurrently; verify all processed, no deadlock
+**Unit tests** (`internal/ingest/worker_test.go`):
+- `TestWorker_ProcessesJob` — insert a job into the `jobs` table; verify worker picks it up and calls processor within 1s
+- `TestWorker_RetryOnFailure` — processor fails twice then succeeds; verify job processed on third attempt via job table retry count
+- `TestWorker_MaxRetriesExceeded` — processor always fails; verify job marked as failed after 3 attempts (no infinite loop)
+- `TestWorker_ConcurrentEnqueue` — insert 50 jobs into the `jobs` table from 5 goroutines concurrently; verify all processed, no deadlock
 
 **Acceptance criteria:**
 - `POST /ingest` with `{"source":"cli","type":"text","content":"I prefer Go over Python for backend services","tags":["preference"]}` returns `{"id":"...","status":"queued"}` immediately
-- Within 30s (deep model processing time), the document appears in LanceDB and is retrievable
+- Within 30s (deep model processing time), the document appears in the VectorStore and is retrievable
 - URL ingestion fetches and strips HTML, stores clean text
 - `go test ./internal/api/...` and `./internal/ingest/...` pass
 
@@ -63,6 +76,7 @@
 - Add dependency: `github.com/mark3labs/mcp-go` (or implement minimal MCP server from spec)
 - Create `internal/api/mcp.go`:
   - Start MCP server on configured port (default 4001) or as stdio transport (for `claude mcp add` compatibility)
+  - MCP server uses stdio transport for Claude Code (no HTTP auth needed) or HTTP with bearer token auth on the HTTP transport
   - Register tools:
     - `add_context`: args `{title: string, content: string, tags?: string[]}` → calls `/ingest`, returns doc ID
     - `recall`: args `{query: string, limit?: int}` → calls retriever, returns array of context chunks with scores
@@ -113,6 +127,9 @@
   - `tbyd interactions` — list recent interactions
     - `tbyd interactions list [--limit N]`
     - `tbyd interactions show <id>`
+  - `tbyd data` — export or purge all stored data
+    - `tbyd data export [--output <file>]`
+    - `tbyd data purge [--confirm]`
   - `tbyd config` — show/edit config
     - `tbyd config show`
     - `tbyd config set <key> <value>`
@@ -151,24 +168,25 @@
   ```
 - When enabled, after each cloud response:
   - Store full interaction in SQLite `interactions` table
-  - Embed the interaction summary asynchronously and index in LanceDB
+  - Embed the interaction summary asynchronously and index in VectorStore
   - Interaction summary = `"[date] User asked about X. Response: Y."` (generated by deep model, async)
+  - Interaction summary is generated by the fast model if deep model is not configured; deep model used when available
 - Implement `GET /interactions` API endpoint: returns paginated list
-- Implement `DELETE /interactions/:id` — hard delete from SQLite and LanceDB
+- Implement `DELETE /interactions/:id` — hard delete from SQLite and VectorStore
 
 **Unit tests** (`internal/api/interactions_test.go`):
 - `TestSaveInteraction_OptInEnabled` — config has `save_interactions=true`; send a request; verify interaction saved to mock store
 - `TestSaveInteraction_OptInDisabled` — config has `save_interactions=false`; send a request; verify store not called
 - `TestGetInteractions_Paginated` — store has 20 interactions; GET with `limit=5&offset=0`; verify 5 returned
 - `TestGetInteractions_Empty` — empty store; verify empty array returned (not 404)
-- `TestDeleteInteraction` — save interaction; DELETE it; verify removed from both SQLite mock and LanceDB mock
+- `TestDeleteInteraction` — save interaction; DELETE it; verify removed from both SQLite mock and VectorStore mock
 - `TestDeleteInteraction_NotFound` — DELETE non-existent ID; verify 404
 
 **Acceptance criteria:**
 - With `save_interactions = false` (default), nothing is stored after a query
 - With `save_interactions = true`, interactions appear in `tbyd interactions list`
 - A stored interaction about topic X is retrievable by semantic search later
-- Delete removes the record from both SQLite and LanceDB
+- Delete removes the record from both SQLite and VectorStore
 
 ---
 
@@ -267,5 +285,7 @@
 5. Open Preferences, toggle "save interactions" → send a query → verify behavior matches toggle
 6. Quit menubar app → Go binary stops; reopen → binary restarts
 7. Profile Editor: set tone to "formal" → send query → verify "formal" appears in enriched system prompt
-8. `go test ./...` passes
-9. Swift tests pass: `xcodebuild test -scheme tbyd -destination 'platform=macOS'`
+8. Verify `POST /ingest` without bearer token returns 401
+9. Verify `tbyd data export` produces valid JSONL
+10. `go test ./...` passes
+11. Swift tests pass: `xcodebuild test -scheme tbyd -destination 'platform=macOS'`

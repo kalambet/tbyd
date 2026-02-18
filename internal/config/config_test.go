@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -16,27 +14,51 @@ func (m mockKeychain) Get(service, account string) (string, error) {
 	return m.value, m.err
 }
 
-func writeTempConfig(t *testing.T, content string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
+// mockBackend is an in-memory ConfigBackend for testing.
+type mockBackend struct {
+	strings map[string]string
+	ints    map[string]int
 }
 
-// TestDefaults verifies all default values are applied when loading an empty config file.
-func TestDefaults(t *testing.T) {
-	path := writeTempConfig(t, `[proxy]
-openrouter_api_key = "test-key"
-`)
-	// Point the loader at our temp file by overriding the search paths.
-	orig := os.Getenv("TBYD_OPENROUTER_API_KEY")
-	os.Setenv("TBYD_OPENROUTER_API_KEY", "")
-	defer os.Setenv("TBYD_OPENROUTER_API_KEY", orig)
+func newMockBackend() *mockBackend {
+	return &mockBackend{
+		strings: make(map[string]string),
+		ints:    make(map[string]int),
+	}
+}
 
-	cfg, err := loadFromPath(path, mockKeychain{})
+func (m *mockBackend) GetString(key string) (string, bool, error) {
+	v, ok := m.strings[key]
+	return v, ok, nil
+}
+
+func (m *mockBackend) GetInt(key string) (int, bool, error) {
+	v, ok := m.ints[key]
+	return v, ok, nil
+}
+
+func (m *mockBackend) SetString(key, val string) error {
+	m.strings[key] = val
+	return nil
+}
+
+func (m *mockBackend) SetInt(key string, val int) error {
+	m.ints[key] = val
+	return nil
+}
+
+func (m *mockBackend) Delete(key string) error {
+	delete(m.strings, key)
+	delete(m.ints, key)
+	return nil
+}
+
+// TestDefaults verifies all default values are applied when the backend is empty.
+func TestDefaults(t *testing.T) {
+	b := newMockBackend()
+	kc := mockKeychain{value: "test-key"}
+
+	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,66 +86,20 @@ openrouter_api_key = "test-key"
 	}
 }
 
-// TestEnvOverride verifies that environment variables override config file values.
-func TestEnvOverride(t *testing.T) {
-	path := writeTempConfig(t, `[proxy]
-openrouter_api_key = "file-key"
-`)
+// TestBackendOverride verifies that backend values override defaults.
+func TestBackendOverride(t *testing.T) {
+	b := newMockBackend()
+	b.ints["server.port"] = 5000
+	b.ints["server.mcp_port"] = 5001
+	b.strings["ollama.base_url"] = "http://custom:11434"
+	b.strings["ollama.fast_model"] = "custom-fast"
+	b.strings["ollama.deep_model"] = "custom-deep"
+	b.strings["ollama.embed_model"] = "custom-embed"
+	b.strings["storage.data_dir"] = "/tmp/tbyd-test"
+	b.strings["proxy.default_model"] = "openai/gpt-4o"
 
-	t.Setenv("TBYD_OPENROUTER_API_KEY", "env-key")
-
-	cfg, err := loadFromPath(path, mockKeychain{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if cfg.Proxy.OpenRouterAPIKey != "env-key" {
-		t.Errorf("OpenRouterAPIKey = %q, want %q", cfg.Proxy.OpenRouterAPIKey, "env-key")
-	}
-}
-
-// TestMissingRequiredField verifies a clear error when the API key is missing everywhere.
-func TestMissingRequiredField(t *testing.T) {
-	path := writeTempConfig(t, `# empty config`)
-
-	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
-
-	_, err := loadFromPath(path, mockKeychain{})
-	if err == nil {
-		t.Fatal("expected error for missing API key, got nil")
-	}
-
-	want := "missing required config"
-	if got := err.Error(); !contains(got, want) {
-		t.Errorf("error = %q, want it to contain %q", got, want)
-	}
-}
-
-// TestTOMLParsing verifies that all fields are correctly read from a TOML file.
-func TestTOMLParsing(t *testing.T) {
-	content := `
-[server]
-port = 5000
-mcp_port = 5001
-
-[ollama]
-base_url = "http://custom:11434"
-fast_model = "custom-fast"
-deep_model = "custom-deep"
-embed_model = "custom-embed"
-
-[storage]
-data_dir = "/tmp/tbyd-test"
-
-[proxy]
-openrouter_api_key = "toml-key-123"
-default_model = "openai/gpt-4o"
-`
-	path := writeTempConfig(t, content)
-
-	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
-
-	cfg, err := loadFromPath(path, mockKeychain{})
+	kc := mockKeychain{value: "backend-key"}
+	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -149,22 +125,57 @@ default_model = "openai/gpt-4o"
 	if cfg.Storage.DataDir != "/tmp/tbyd-test" {
 		t.Errorf("Storage.DataDir = %q", cfg.Storage.DataDir)
 	}
-	if cfg.Proxy.OpenRouterAPIKey != "toml-key-123" {
-		t.Errorf("Proxy.OpenRouterAPIKey = %q", cfg.Proxy.OpenRouterAPIKey)
-	}
 	if cfg.Proxy.DefaultModel != "openai/gpt-4o" {
 		t.Errorf("Proxy.DefaultModel = %q", cfg.Proxy.DefaultModel)
 	}
 }
 
-// TestKeychainFallback verifies the Keychain is consulted when no API key is in file or env.
+// TestEnvOverride verifies that environment variables override backend values.
+func TestEnvOverride(t *testing.T) {
+	b := newMockBackend()
+	b.ints["server.port"] = 5000
+
+	t.Setenv("TBYD_OPENROUTER_API_KEY", "env-key")
+	t.Setenv("TBYD_SERVER_PORT", "6000")
+
+	cfg, err := loadWith(b, mockKeychain{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Proxy.OpenRouterAPIKey != "env-key" {
+		t.Errorf("OpenRouterAPIKey = %q, want %q", cfg.Proxy.OpenRouterAPIKey, "env-key")
+	}
+	if cfg.Server.Port != 6000 {
+		t.Errorf("Server.Port = %d, want 6000 (env should override backend)", cfg.Server.Port)
+	}
+}
+
+// TestMissingRequiredField verifies a clear error when the API key is missing everywhere.
+func TestMissingRequiredField(t *testing.T) {
+	b := newMockBackend()
+
+	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
+
+	_, err := loadWith(b, mockKeychain{})
+	if err == nil {
+		t.Fatal("expected error for missing API key, got nil")
+	}
+
+	want := "missing required config"
+	if got := err.Error(); !contains(got, want) {
+		t.Errorf("error = %q, want it to contain %q", got, want)
+	}
+}
+
+// TestKeychainFallback verifies the Keychain is consulted when no API key is in backend or env.
 func TestKeychainFallback(t *testing.T) {
-	path := writeTempConfig(t, `# no api key in file`)
+	b := newMockBackend()
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
 	kc := mockKeychain{value: "keychain-secret"}
-	cfg, err := loadFromPath(path, kc)
+	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -174,11 +185,20 @@ func TestKeychainFallback(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
+// TestSecretNotReadFromBackend verifies that secret keys are never read from the backend.
+func TestSecretNotReadFromBackend(t *testing.T) {
+	b := newMockBackend()
+	b.strings["proxy.openrouter_api_key"] = "should-be-ignored"
+
+	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
+
+	_, err := loadWith(b, mockKeychain{})
+	if err == nil {
+		t.Fatal("expected error: secret should not be read from backend, so API key should be missing")
+	}
 }
 
-func searchString(s, substr string) bool {
+func contains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
 			return true

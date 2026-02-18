@@ -15,7 +15,7 @@
   - All `package` imports across the codebase
   - Binary name in `Makefile`
   - Xcode project name and bundle ID (`com.yourname.<projectname>`)
-  - Config file name (`.tbyd.toml` → `.<name>.toml`)
+  - UserDefaults domain (`com.tbyd.app` → `com.<name>.app`)
   - Data directory name (`Application Support/TBYD/` → `Application Support/<Name>/`)
 - Create minimal brand assets:
   - Menubar icon (SVG, exported at 16x16 and 32x32 for retina) — must work in both light and dark mode
@@ -34,16 +34,17 @@
 **Context:** A first-time user should be able to go from zero to their first enriched query in under 5 minutes. The onboarding flow handles prerequisite checks, API key setup, and first data entry.
 
 **Tasks:**
-- On first launch (no config file found): show onboarding wizard in SwiftUI
+- On first launch (no UserDefaults values found): show onboarding wizard in SwiftUI
 - Onboarding steps:
   1. **Welcome** — one-screen explanation of what the app does and what data stays local
-  2. **Prerequisites check** — verify Ollama is installed; if not, show install link and "Check again" button; if yes, green checkmark
+  2. **Prerequisites check** — verify Ollama is installed; if not, show install link and "Check again" button; if yes, green checkmark. Note: tbyd requires Ollama to be running — it does not manage the Ollama process
   3. **API key setup** — OpenRouter API key field with link to get one; stores in Keychain on save; verifies by calling `GET /v1/models`
-  4. **Model download** — shows download progress for `phi3.5` and `nomic-embed-text` (Ollama pull); skippable with "use later" option
-  5. **Profile quick-start** — 3 optional fields: role/title, primary domain, communication preference (dropdown); "Skip" available
-  6. **Data collection consent** — clear explanation of what's stored and where; toggle for `save_interactions`; "I understand, continue" button
-  7. **Done** — shows MCP setup snippet for Claude Code; "Open Data Browser"; "Start using tbyd"
-- Mark onboarding complete in config: `[app] onboarding_complete = true`
+  4. **API token generation** — generate localhost bearer token, store in Keychain, show token for browser extension setup
+  5. **Model download** — shows download progress for `phi3.5` and `nomic-embed-text` (Ollama pull); skippable with "use later" option
+  6. **Profile quick-start** — 3 optional fields: role/title, primary domain, communication preference (dropdown); "Skip" available
+  7. **Data collection consent** — clear explanation of what's stored and where; toggle for `save_interactions`; "I understand, continue" button
+  8. **Done** — shows MCP setup snippet for Claude Code; "Open Data Browser"; "Start using tbyd"
+- Mark onboarding complete: `defaults write com.tbyd.app app.onboarding_complete -bool true`
 - CLI equivalent: `tbyd setup` walks through the same steps in the terminal
 
 **Swift unit tests** (`macos/Tests/OnboardingTests/`):
@@ -53,7 +54,7 @@
 - `OnboardingViewModelTests.testAPIKeyValidation_Valid` — mock `/v1/models` returns 200; verify step advances
 - `OnboardingViewModelTests.testAPIKeyValidation_Invalid` — mock returns 401; verify error message shown, step does not advance
 - `OnboardingViewModelTests.testSkipProfile` — tap skip on profile step; verify step advances without profile data set
-- `OnboardingViewModelTests.testCompletionWritesConfig` — complete all steps; verify `onboarding_complete = true` written to config
+- `OnboardingViewModelTests.testCompletionWritesConfig` — complete all steps; verify `app.onboarding_complete = true` written to UserDefaults
 
 **Acceptance criteria:**
 - First-time user can complete onboarding in < 5 minutes
@@ -70,14 +71,15 @@
 **Tasks:**
 - Evaluate options:
   - **SQLite encryption**: `SQLCipher` (CGO — undesirable); `go-sqlcipher` wrapper; or **file-level encryption**
-  - **Recommended approach**: encrypt the SQLite file and LanceDB directory at the OS level using macOS Data Protection
+  - **Recommended approach**: encrypt the SQLite database file at the OS level using macOS Data Protection
     - Create `~/Library/Application Support/<name>/` with protection class `NSFileProtectionComplete`
     - This ensures data is unreadable when device is locked (macOS FileVault must be enabled)
     - Zero implementation overhead; no CGO
 - For users without FileVault:
   - Warn during onboarding: "Enable FileVault for full data protection"
   - Store API keys in macOS Keychain (already done in Issue 0.2)
-  - Do NOT store API keys in config file
+  - The localhost API bearer token is stored in macOS Keychain alongside the OpenRouter API key
+  - Do NOT store API keys in UserDefaults
 - For sensitive content flagged by user (future extension):
   - Allow per-document encryption using `golang.org/x/crypto/nacl/secretbox`
   - Key derived from macOS Keychain entry
@@ -92,7 +94,7 @@
 
 **Acceptance criteria:**
 - Database directory has `NSFileProtectionComplete` attribute set (verify with `xattr -l`)
-- API keys are stored in Keychain, not in plain text config file
+- API keys are stored in Keychain, not in UserDefaults
 - Warning displayed during onboarding if FileVault is not enabled
 - No API keys appear in log output at any log level
 
@@ -199,13 +201,15 @@
   - How to export/delete all data
 - `docs/mcp-setup.md` — step-by-step Claude Code MCP integration
 - `docs/fine-tuning.md` — how to prepare data and run fine-tuning
+- `docs/vectorstore-migration.md` — Vector store migration guide (SQLite → LanceDB)
+- `docs/security.md` — Localhost auth model, Keychain usage, CSRF prevention
 - `CONTRIBUTING.md` — dev setup, testing, PR process
 - In-app help: "?" button in each SwiftUI view links to relevant docs section
 
 **Documentation tests** (`docs/tests/`):
 - `test_readme_links.sh` — verify all markdown links in README.md resolve (no 404s)
 - `test_cli_help_coverage.sh` — run `tbyd --help` and each subcommand `--help`; verify all commands documented in README are present in help output
-- `test_example_config_valid.sh` — parse `config.toml.example` with the config loader; verify no parse errors
+- `test_default_config_valid.sh` — load config with empty backend; verify all defaults are valid and no errors
 
 **Acceptance criteria:**
 - A non-technical user can follow README to get their first enriched query in < 10 minutes
@@ -217,7 +221,7 @@
 ## Phase 5 Verification
 
 1. Fresh macOS machine: `brew tap ... && brew install ...` → `tbyd setup` → send first query → verify enrichment works
-2. Verify no plaintext API keys in config file or logs
+2. Verify no plaintext API keys in UserDefaults or logs
 3. Verify `xattr -l ~/Library/Application\ Support/<name>/` shows NSFileProtectionComplete
 4. Uninstall via `brew uninstall` → verify all processes stopped
 5. Re-install → verify data from previous installation is preserved in Application Support
@@ -226,3 +230,4 @@
 8. `go test -tags integration ./...` passes
 9. Swift tests pass: `xcodebuild test -scheme tbyd -destination 'platform=macOS'`
 10. Documentation tests pass: `bash docs/tests/test_readme_links.sh`
+11. Verify bearer token is stored in Keychain, not in UserDefaults

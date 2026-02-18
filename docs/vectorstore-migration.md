@@ -2,9 +2,11 @@
 
 ## Current: SQLite Brute-Force (`SQLiteStore`)
 
-The current implementation stores embeddings as BLOBs in SQLite and performs
-brute-force cosine similarity search in Go. This is sufficient for ~50-100K
-vectors with query latency under 250ms on Apple Silicon.
+The current implementation stores embeddings as BLOBs in the `context_vectors` table
+in SQLite and performs brute-force cosine similarity search in Go. This is sufficient
+for ~50–100K vectors with query latency under 250ms on Apple Silicon.
+
+Embedding model: `nomic-embed-text` via Ollama (768 dimensions).
 
 ## When to Migrate
 
@@ -12,6 +14,12 @@ Consider migrating when:
 - Vector count exceeds ~100K and query latency is noticeable (>200ms)
 - You need ANN indexes (HNSW, IVF-PQ) for sub-10ms queries at scale
 - Auto-ingest features (RSS, browser extension) push growth to 500+ vectors/day
+
+## Current Limitations
+
+- **No filter support**: SQLite backend currently ignores the `filter` parameter in `Search()`. All results are ranked by cosine similarity only. Basic metadata filtering (by `source_type`, `tags`) is planned as a pre-LanceDB improvement.
+- **No ANN indexes**: brute-force scan means latency grows linearly with vector count.
+- **Single embedding dimension**: hardcoded to 768-d (`nomic-embed-text`). Changing models requires re-embedding all stored vectors.
 
 ## Architecture
 
@@ -95,12 +103,17 @@ for i := 0; i < len(records); i += 1000 {
 
 ### Step 4: Switch in config
 
-Add a config option to select the backend:
+Add config keys to select the backend (UserDefaults on macOS, XDG JSON on Linux).
+These keys are **planned for Phase 4** — add them to `keys.go` when implementing the migration:
 
-```toml
-[retrieval]
-backend = "lancedb"  # or "sqlite" (default)
-lancedb_url = "http://localhost:4002"
+```bash
+# macOS
+defaults write com.tbyd.app retrieval.backend -string "lancedb"
+defaults write com.tbyd.app retrieval.lancedb_url -string "http://localhost:4002"
+
+# Or via environment variables
+TBYD_RETRIEVAL_BACKEND=lancedb
+TBYD_RETRIEVAL_LANCEDB_URL=http://localhost:4002
 ```
 
 ### Step 5: Process lifecycle

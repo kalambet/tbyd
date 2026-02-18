@@ -32,7 +32,7 @@
   browser-extension/
   ```
 - Add `cmd/tbyd/main.go` with a placeholder `main()` that prints version and exits
-- Add `.gitignore` (Go standard + macOS + `.tbyd.toml` local override)
+- Add `.gitignore` (Go standard + macOS)
 - Add `Makefile` with targets: `build`, `run`, `test`, `lint`
 
 **Acceptance criteria:**
@@ -41,53 +41,68 @@
 
 ---
 
-## Issue 0.2 — Config loader (TOML)
+## Issue 0.2 — Config loader (platform-native backend)
 
-**Context:** All runtime settings (ports, model names, data paths, API keys) must be read from a config file. API keys must never be hardcoded.
+**Context:** All runtime settings (ports, model names, data paths, API keys) must be read from a platform-native config backend. API keys must never be hardcoded. On macOS, config is stored in UserDefaults (`com.tbyd.app` domain), which is shared with the SwiftUI app. On Linux, a JSON file at `$XDG_CONFIG_HOME/tbyd/config.json` is used. A `ConfigBackend` interface abstracts the platform differences.
 
 **Tasks:**
-- Create `internal/config/config.go`
-- Define `Config` struct with fields:
+- Create `internal/config/backend.go` — define `ConfigBackend` interface:
+  ```go
+  type ConfigBackend interface {
+      GetString(key string) (val string, ok bool, err error)
+      GetInt(key string) (val int, ok bool, err error)
+      SetString(key, val string) error
+      SetInt(key string, val int) error
+      Delete(key string) error
+  }
+  ```
+- Create `internal/config/backend_darwin.go` — `darwinBackend` using `defaults read/write com.tbyd.app`
+- Create `internal/config/backend_other.go` — `fileBackend` using flat JSON in XDG config dir
+- Create `internal/config/keys.go` — key specs table mapping flat keys (e.g. `"server.port"`) to `Config` struct fields, types, and env var names. Secrets are flagged and never read from the backend
+- Create `internal/config/config.go` — `Config` struct, `defaults()`, `Load()`:
   ```go
   type Config struct {
     Server   ServerConfig
     Ollama   OllamaConfig
     Storage  StorageConfig
     Proxy    ProxyConfig
-  }
-  type ServerConfig struct {
-    Port int    // default 4000
-    MCPPort int // default 4001
-  }
-  type OllamaConfig struct {
-    BaseURL    string // default "http://localhost:11434"
-    FastModel  string // default "phi3.5"
-    DeepModel  string // default "mistral-nemo"
-    EmbedModel string // default "nomic-embed-text"
-  }
-  type StorageConfig struct {
-    DataDir string // default "$HOME/Library/Application Support/tbyd"
-  }
-  type ProxyConfig struct {
-    OpenRouterAPIKey  string
-    DefaultModel      string // e.g. "anthropic/claude-opus-4"
+    Log      LogConfig
   }
   ```
-- Load from `~/.config/tbyd/config.toml` (XDG) with fallback to `./tbyd.toml`
+  Load order: code defaults → backend overlay (skip secrets) → env overrides → platform secret store fallback
 - Override any field from environment variables (e.g. `TBYD_OPENROUTER_API_KEY`)
-- Add `config.toml.example` to repo root with all fields documented
-- Store `OpenRouterAPIKey` in macOS Keychain via `security` CLI on first run; read from Keychain at runtime (fallback to env var)
+- Secrets (API keys, tokens) are stored in a platform-specific secret store:
+  - **macOS:** Keychain via `security` CLI (service: `tbyd`)
+  - **Linux:** environment variables only (no secret store yet; future: `libsecret`/`gnome-keyring`)
+- On first run, generate a random 256-bit API token and store in the platform secret store under `tbyd-api-token`
+- Add `GetAPIToken() (string, error)` to config that reads from the secret store
+- Add `LogConfig` to `Config` struct:
+  ```go
+  type LogConfig struct {
+      Level string // default "info"
+  }
+  ```
+
+**Setting config values (macOS):**
+```bash
+defaults write com.tbyd.app server.port -int 4000
+defaults write com.tbyd.app ollama.base_url -string "http://localhost:11434"
+defaults read com.tbyd.app   # view all settings
+```
 
 **Unit tests** (`internal/config/config_test.go`):
-- `TestDefaults` — load with empty config file; verify all defaults are applied correctly
-- `TestEnvOverride` — set `TBYD_OPENROUTER_API_KEY` env var; verify it overrides config file value
+- `TestDefaults` — load with empty backend; verify all defaults are applied correctly
+- `TestBackendOverride` — populate mock backend with all fields; verify each is read correctly
+- `TestEnvOverride` — set `TBYD_OPENROUTER_API_KEY` env var; verify it overrides backend value
 - `TestMissingRequiredField` — load with no API key anywhere; verify error message mentions the missing field
-- `TestTOMLParsing` — load from a temp file with all fields set; verify each field is read correctly
-- `TestKeychainFallback` — mock `security` CLI; verify Keychain read is attempted before env var
+- `TestKeychainFallback` — mock secret store; verify platform secret store is consulted when API key is missing
+- `TestSecretNotReadFromBackend` — put API key in backend; verify it is not read (secrets never come from backend)
+- `TestAPITokenGenerated` — first call generates token; second call returns same token
 
 **Acceptance criteria:**
-- Config loads without error from example file
-- Missing required fields (API key) produce a clear error message pointing user to docs
+- Config loads without error when backend + env + secret store provide required values
+- Missing required fields (API key) produce a clear error message
+- Secrets are never stored in or read from UserDefaults/JSON backend
 - `go test ./internal/config/...` passes
 
 ---
@@ -100,7 +115,8 @@
 - Add dependency: `go get modernc.org/sqlite`
 - Create `internal/storage/sqlite.go` with:
   - `Open(dataDir string) (*Store, error)` — opens/creates the database file
-  - Migration runner: applies versioned SQL files in order
+     - Set pragmas on open: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`
+   - Migration runner: applies versioned SQL files in order
 - Create `internal/storage/migrations/` with initial migration `001_initial.sql`:
   ```sql
   CREATE TABLE IF NOT EXISTS schema_version (
@@ -115,6 +131,7 @@
       enriched_prompt TEXT,
       cloud_model TEXT,
       cloud_response TEXT,
+      status TEXT NOT NULL DEFAULT 'completed',
       feedback_score INTEGER DEFAULT 0,
       feedback_notes TEXT,
       vector_ids TEXT DEFAULT '[]'
@@ -135,6 +152,37 @@
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       vector_id TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS context_vectors (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      text_chunk TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]'
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_context_vectors_source_id ON context_vectors(source_id);
+  CREATE INDEX IF NOT EXISTS idx_context_vectors_source_type ON context_vectors(source_type);
+
+  CREATE INDEX IF NOT EXISTS idx_interactions_feedback ON interactions(feedback_score);
+  CREATE INDEX IF NOT EXISTS idx_interactions_created ON interactions(created_at);
+
+  CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 3,
+      run_after DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_error TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_jobs_status_run_after ON jobs(status, run_after);
   ```
 - Implement `Store` methods:
   - `SaveInteraction(i Interaction) error`
@@ -147,6 +195,10 @@
   - `SaveContextDoc(doc ContextDoc) error`
   - `GetContextDoc(id string) (ContextDoc, error)`
   - `ListContextDocs(limit int) ([]ContextDoc, error)`
+   - `EnqueueJob(job Job) error`
+   - `ClaimNextJob(types []string) (*Job, error)`
+   - `CompleteJob(id string) error`
+   - `FailJob(id string, err string) error`
 
 **Unit tests** (`internal/storage/sqlite_test.go`) — use in-memory SQLite (`:memory:`):
 - `TestMigrationsIdempotent` — run `Open()` twice on the same path; verify schema_version count stays correct
@@ -158,6 +210,9 @@
 - `TestProfileKeyRoundTrip` — set a key, get it back, verify exact match
 - `TestGetAllProfileKeys` — set 5 keys, call `GetAllProfileKeys`, verify map has all 5
 - `TestSaveAndListContextDocs` — save 3 docs, call `ListContextDocs(2)`, verify 2 returned
+- `TestEnqueueAndClaimJob` — enqueue a job, claim it, verify fields match
+- `TestClaimJob_RespectRunAfter` — enqueue with future `run_after`; verify not claimed yet
+- `TestFailJob_IncrementsAttempts` — fail a job; verify attempts incremented
 
 **Acceptance criteria:**
 - `go test ./internal/storage/...` passes (in-memory SQLite for tests)

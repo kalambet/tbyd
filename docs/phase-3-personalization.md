@@ -45,9 +45,7 @@
 **Tasks:**
 - Extend `internal/profile/types.go` with full `Profile` schema (see PLAN.md Digital Self Representation section)
 - Implement `internal/profile/manager.go` CRUD operations for all profile fields
-- Extend `POST /profile` and `GET /profile` HTTP endpoints:
-  - `GET /profile` — return full profile JSON
-  - `PATCH /profile` — partial update (merge, not replace)
+- Extend profile HTTP endpoints (basic GET/PATCH added in Phase 2):
   - `DELETE /profile/:field` — remove a field or array item
 - In SwiftUI `ProfileEditorView.swift`:
   - Section: Identity (role, expertise key-value pairs, current projects)
@@ -98,7 +96,7 @@
           Confidence float64
       }
       ```
-  - Runs asynchronously via the ingest queue (does not block feedback endpoint response)
+  - Runs asynchronously via the SQLite-backed job queue (enqueues a `feedback_extract` job) (does not block feedback endpoint response)
 - Create `internal/synthesis/aggregator.go`:
   - `Aggregator` accumulates `PreferenceSignal` over time
   - `Aggregate(signals []PreferenceSignal) ProfileDelta`
@@ -148,6 +146,7 @@
   - Separate "explicit preferences" section (always injected, highest priority) from "context" section (injected if budget allows)
   - Explicit preferences come directly from `profile.Preferences` and `profile.Opinions`
   - Never truncate explicit preferences — only truncate retrieved context chunks
+  - Hard cap: if explicit preferences exceed 200 tokens, include only the most recent N that fit. Remaining preferences are accessible via the MCP `recall` tool.
 
 **Unit tests** (`internal/profile/calibration_test.go`):
 - `TestGetCalibrationContext_GoExpert` — profile has `expertise.go = "expert"`; verify calibration string includes "expert Go"
@@ -185,16 +184,8 @@
     6. Write delta to a pending-review table (user reviews before applying)
     7. Notify via local notification if changes detected
   - `Schedule(interval time.Duration)` — runs `Run()` on a ticker (default: daily at 2 AM)
-- Create `internal/storage/migrations/002_synthesis.sql`:
-  ```sql
-  CREATE TABLE IF NOT EXISTS pending_profile_deltas (
-      id TEXT PRIMARY KEY,
-      delta_json TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      reviewed_at DATETIME,
-      accepted INTEGER DEFAULT 0
-  );
-  ```
+    - Uses the job queue to schedule synthesis runs (enqueues a `nightly_synthesis` job)
+- Add `pending_profile_deltas` table via new migration (002_synthesis.sql)
 - Add `GET /profile/pending-deltas` and `POST /profile/pending-deltas/:id/accept|reject` endpoints
 - In SwiftUI: show notification badge on menubar icon when pending profile updates exist; show review UI in ProfileEditorView
 

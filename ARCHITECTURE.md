@@ -41,7 +41,7 @@ TBYD (working title) is a **local-first data sovereignty layer** that sits betwe
 │                        │                     │                   │
 │          ┌─────────────▼──────────────┐      │                   │
 │          │   CONTEXT RETRIEVER        │◄─────┘                   │
-│          │   (LanceDB semantic search)│                          │
+│          │   (VectorStore search)     │                          │
 │          └─────────────┬──────────────┘                          │
 │                        │                                         │
 │          ┌─────────────▼──────────────┐                          │
@@ -59,8 +59,8 @@ TBYD (working title) is a **local-first data sovereignty layer** that sits betwe
 
           ┌──────────────────────────────────┐
           │   LOCAL STORAGE                  │
-          │   SQLite (interactions, profile) │
-          │   LanceDB (vectors, embeddings)  │
+          │   SQLite (interactions, profile, │
+          │           vectors, embeddings)   │
           └──────────────────────────────────┘
                          │
           ┌──────────────▼──────────────────┐
@@ -78,7 +78,7 @@ TBYD (working title) is a **local-first data sovereignty layer** that sits betwe
 Single compiled binary for macOS (ARM64 + AMD64). Manages lifecycle of all subsystems.
 
 **Responsibilities:**
-- Start/stop Ollama subprocess (or verify it's running)
+- Verify Ollama is running on startup (exit with instructions if not — tbyd does not manage the Ollama process)
 - Initialize databases on first run
 - Expose API surfaces
 - Orchestrate enrichment pipeline
@@ -89,12 +89,12 @@ cmd/tbyd/          ← main entrypoint, CLI flags
 internal/api/      ← OpenAI-compat REST server + MCP server
 internal/pipeline/ ← enrichment orchestration
 internal/intent/   ← intent extraction (calls local LLM)
-internal/retrieval/ ← LanceDB context retrieval
+internal/retrieval/ ← VectorStore context retrieval
 internal/composer/ ← prompt composition logic
-internal/storage/  ← SQLite + LanceDB wrappers
+internal/storage/  ← SQLite wrappers (data + vectors)
 internal/proxy/    ← cloud LLM HTTP client (OpenRouter)
 internal/profile/  ← user profile management
-internal/config/   ← config file handling
+internal/config/   ← platform-native config (UserDefaults on macOS, XDG JSON on Linux)
 ```
 
 ### 2. API Surface — Three Entry Points
@@ -133,8 +133,11 @@ Request flow through the pipeline:
 User Query
     │
     ▼
-[1. Bypass Check]
-    Is this a sensitive query user marked as private? → route directly to cloud, no enrichment
+[1. Mode Check]
+    Determine request mode:
+    - normal: full enrichment pipeline → cloud
+    - bypass (no_enrich): skip enrichment, forward to cloud unchanged, do not store
+    - local_only (future): route to local Ollama, no cloud call
     │
     ▼
 [2. Intent Extraction] — local LLM call
@@ -144,7 +147,7 @@ User Query
     Format: JSON schema with constrained output
     │
     ▼
-[3. Context Retrieval] — LanceDB
+[3. Context Retrieval] — VectorStore
     Semantic search on entity + topic embeddings
     Returns: top-K relevant documents/interactions
     Sources: past interactions, user-uploaded docs, manual notes
@@ -182,7 +185,8 @@ Given the expanded scope of local processing (real-time intent extraction AND ba
 - macOS native, excellent Apple Silicon optimization
 - Manages model downloads and versioning
 - OpenAI-compatible API at `localhost:11434/v1/`
-- TBYD checks if Ollama is running, starts it if not, pulls both models on first run
+- TBYD checks if Ollama is running on startup; exits with instructions if not
+- Fast model + embed model are pulled on first run; deep model is pulled on first background task that needs it
 
 | Role | Model | Parameters | RAM | Latency | Use when |
 |------|-------|-----------|-----|---------|----------|
@@ -201,6 +205,7 @@ Given the expanded scope of local processing (real-time intent extraction AND ba
 - Better world knowledge for domain/interest classification of diverse content
 - Runs asynchronously in background — no latency constraint
 - `mistral-nemo` preferred; `gemma2:9b` if RAM is constrained
+- **Opt-in:** deep model features are enabled only when configured; system is fully functional with fast model alone
 
 **Model assignment by task:**
 - Intent extraction → fast model
@@ -222,9 +227,10 @@ interactions (
     enriched_prompt TEXT,       -- what was sent to cloud
     cloud_model TEXT,           -- which model was used
     cloud_response TEXT,        -- what came back
+    status TEXT DEFAULT 'completed',  -- completed | aborted | error
     feedback_score INT,         -- -1, 0, 1
     feedback_notes TEXT,        -- user correction/notes
-    vector_ids TEXT             -- JSON array of LanceDB doc IDs used
+    vector_ids TEXT             -- JSON array of vector doc IDs used
 )
 
 user_profile (
@@ -240,15 +246,16 @@ context_docs (
     source TEXT,                -- "manual", "extracted", "interaction"
     tags TEXT,                  -- JSON array
     created_at DATETIME,
-    vector_id TEXT              -- corresponding LanceDB entry
+    vector_id TEXT              -- corresponding vector store entry
 )
 ```
 
-**LanceDB (vector store)**
-- Embedded via `lancedb-go` or HTTP API
-- Stores embeddings for: interactions, context docs, extracted entities
-- Embedding model: `nomic-embed-text` via Ollama (384 dimensions, runs locally)
-- Indexes enable sub-50ms semantic search
+**Vector Store (SQLite brute-force, upgradeable to LanceDB)**
+- Embeddings stored as BLOBs in SQLite `context_vectors` table with brute-force cosine similarity search in Go
+- Sufficient for ~50–100K vectors with query latency under 250ms on Apple Silicon
+- All access goes through a `VectorStore` interface — backend is swappable without changing retrieval logic
+- Embedding model: `nomic-embed-text` via Ollama (768 dimensions, runs locally)
+- Migration path to LanceDB (ANN indexes for sub-10ms search at scale) documented in `docs/vectorstore-migration.md`
 
 ### 6. Cloud Proxy — OpenRouter
 
@@ -308,7 +315,7 @@ Profile schema:
 - Embeddings for the above
 
 **What is NEVER stored:**
-- Raw API keys (stored in macOS Keychain)
+- Raw API keys (stored in platform secret store: macOS Keychain / Linux env vars)
 - Session data from other apps
 - Data from intercepted traffic beyond what user explicitly routes through TBYD
 
@@ -347,16 +354,91 @@ Profile schema:
 | Local LLM runtime | Ollama | macOS-native, model management, OpenAI-compat API |
 | Fast local model (hot path) | phi3.5 (3.8B) | <1s latency, excellent JSON output, fits 8GB RAM |
 | Deep local model (background) | mistral-nemo (12B) / gemma2:9b | Strong document comprehension + synthesis, async |
-| Embedding model | nomic-embed-text (Ollama) | Free, local, 384-dim embeddings |
-| Vector store | LanceDB (embedded) | Lightweight, Rust-core, Go SDK |
+| Embedding model | nomic-embed-text (Ollama) | Free, local, 768-dim embeddings |
+| Vector store | SQLite brute-force (VectorStore interface) | Simple, no extra deps, upgradeable to LanceDB |
 | Relational store | SQLite (modernc pure-Go) | No CGO needed, reliable |
+| Logging | Go `log/slog` (structured) | Stdlib, leveled, JSON-capable |
 | Cloud gateway | OpenRouter | Single API for all cloud models |
 | macOS UI | SwiftUI + Share Extension | Native look/feel, system-level integration |
 | MCP implementation | Go MCP SDK (mark3labs/mcp-go) | Native MCP server for Claude Code |
-| Config format | TOML | Human-readable, simple, good Go support |
+| Config backend | UserDefaults (macOS) / XDG JSON (Linux) | Platform-native, shared with SwiftUI app |
 | Distribution | Single Go binary + Ollama prerequisite | Easy macOS install via Homebrew |
 
 ---
+
+## Localhost Security
+
+All non-OpenAI endpoints (`/ingest`, `/profile`, `/interactions`, MCP) require authentication via a **bearer token** generated on first run and stored in the platform secret store.
+
+- On first run: generate a random 256-bit token, store in the platform secret store under `tbyd-api-token`
+  - **macOS:** Keychain via `security` CLI
+  - **Linux:** `$XDG_DATA_HOME/tbyd/secrets.json` (0600 permissions; future: `libsecret`)
+    - ⚠️ **Security note:** plaintext file storage is a temporary placeholder. It can be exposed via backups, file transfers, or diagnostics. Migrating to `libsecret`/`gnome-keyring` is high-priority technical debt. Linux users should prefer environment variables for secrets until then.
+- All requests to management endpoints must include `Authorization: Bearer <token>`
+- OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`) are unauthenticated (to maintain compatibility with third-party clients) but bound strictly to `127.0.0.1`
+- Browser extension and Share Extension read the token from Keychain / App Group (macOS)
+- CLI reads the token from the secret store automatically
+
+This prevents CSRF-style attacks from malicious web pages targeting `localhost`.
+
+---
+
+## Logging & Observability
+
+**Structured logging** via Go `log/slog` with consistent event schema:
+- Fields: `component`, `request_id`, `interaction_id`, `duration_ms`, `model`, `error`
+- Levels: `info` (default), `debug` (enabled via `--debug` flag or `[log] level = "debug"` in config)
+
+**Redaction policy:**
+- API keys are NEVER logged at any level
+- Full prompts/responses are logged only at `debug` level and only when `save_interactions` is enabled
+- At `info` level: log query length, model, enrichment latency, chunk count — never content
+
+---
+
+## Streaming & Response Capture
+
+When `save_interactions` is enabled and the response is streamed (SSE):
+- The SSE stream is tee'd: one copy goes to the client, one accumulates in a capped buffer
+- On stream completion: store the full response in SQLite asynchronously
+- On client cancellation: store partial response with `status = "aborted"` (not lost)
+- On upstream error: store error details with `status = "error"`
+- Response status is tracked in the `interactions` table: `completed | aborted | error`
+
+---
+
+## Background Job System
+
+All async work (ingestion enrichment, interaction summarization, feedback extraction, nightly synthesis, fine-tuning) runs through a **durable SQLite-backed job queue**, not in-memory channels. This prevents data loss on process restart.
+
+```sql
+jobs (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,          -- "ingest_enrich", "summarize", "feedback_extract", "nightly_synthesis"
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- "pending", "running", "completed", "failed"
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    run_after DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT
+)
+```
+
+- Worker goroutines poll the jobs table on a configurable interval (default 1s)
+- Failed jobs are retried with exponential backoff up to `max_attempts`
+- Completed jobs are retained for 7 days then garbage-collected
+
+---
+
+## Data Lifecycle
+
+Users can export, inspect, and delete all stored data:
+- `tbyd data export` — exports knowledge base, interactions, and profile as JSONL
+- `tbyd data purge` — deletes all data with confirmation prompt (or `--confirm` flag for scripts)
+- Orphaned vectors (vectors whose source doc/interaction was deleted) are garbage-collected on a weekly schedule
+- `tbyd status` reports storage size and record counts
 
 ---
 
@@ -379,10 +461,10 @@ POST /ingest
 }
 ```
 
-After ingestion, the local LLM processes the content to:
+After ingestion, the local LLM processes the content (via background job queue) to:
 - Extract entities, topics, and key points (structured JSON)
 - Classify into interest domains
-- Generate embeddings and store in LanceDB
+- Generate embeddings and store in VectorStore
 - Update the user digital profile
 
 ### Ingestion Sources
@@ -455,7 +537,7 @@ New content arrives (any source)
     ▼
 [3. Embedding + Storage]
     - Embed summary + key points via nomic-embed-text
-    - Store in LanceDB with metadata
+    - Store in VectorStore with metadata
     - Store structured extraction in SQLite context_docs
     │
     ▼
@@ -523,7 +605,7 @@ The local model starts as a general-purpose 3B-7B model and progressively improv
 ```
 Feedback Data (SQLite)
     +
-Ingested Corpus (LanceDB + SQLite)
+Ingested Corpus (VectorStore + SQLite)
     │
     ▼
 [Data Preparation Script] (Python or Go)
@@ -603,23 +685,33 @@ Each phase has a detailed issue breakdown in `docs/`:
 
 | Phase | File | Focus |
 |-------|------|-------|
+| Phase 00 | [docs/phase-00-gaps.md](docs/phase-00-gaps.md) | Foundation gaps: LogConfig, status column, indexes, context_vectors, jobs table, API token |
 | Phase 0 | [docs/phase-0-foundation.md](docs/phase-0-foundation.md) | Go scaffold, config, SQLite, Ollama, passthrough proxy |
-| Phase 1 | [docs/phase-1-enrichment.md](docs/phase-1-enrichment.md) | LanceDB, intent extraction, context retrieval, prompt composer |
+| Phase 1 | [docs/phase-1-enrichment.md](docs/phase-1-enrichment.md) | VectorStore, intent extraction, context retrieval, prompt composer |
 | Phase 2 | [docs/phase-2-user-surfaces.md](docs/phase-2-user-surfaces.md) | MCP server, CLI, SwiftUI menubar app, Share Extension |
 | Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Feedback, profile editor, preference learning, nightly synthesis |
 | Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Browser extension, Feedly sync, content extraction, MLX fine-tuning |
 | Phase 5 | [docs/phase-5-polish-distribution.md](docs/phase-5-polish-distribution.md) | Project rename, onboarding, encryption, Homebrew, App Store |
 
 ### Phase 0 — Foundation
-- [ ] **0.1** Go module init and project layout
-- [ ] **0.2** Config loader (TOML + Keychain for API keys)
-- [ ] **0.3** SQLite storage: schema and migrations
-- [ ] **0.4** Ollama lifecycle manager
-- [ ] **0.5** OpenRouter HTTP client (passthrough)
-- [ ] **0.6** OpenAI-compatible REST API server (passthrough mode)
+- [x] **0.1** Go module init and project layout
+- [x] **0.2** Config loader (UserDefaults + Keychain for API keys)
+- [x] **0.3** SQLite storage: schema and migrations
+- [x] **0.4** Ollama lifecycle manager
+- [x] **0.5** OpenRouter HTTP client (passthrough)
+- [x] **0.6** OpenAI-compatible REST API server (passthrough mode)
+
+### Phase 00 — Foundation Gaps
+- [ ] **00.1** Add `LogConfig` to config
+- [ ] **00.2** Add `status` column to `interactions` table
+- [ ] **00.3** Add indexes to `interactions` table
+- [ ] **00.4** Add `context_vectors` table to migration
+- [ ] **00.5** Add `jobs` table and model
+- [ ] **00.6** Add job queue methods to Store
+- [ ] **00.7** API token generation and platform secret store
 
 ### Phase 1 — Basic Enrichment
-- [ ] **1.1** LanceDB integration + nomic-embed-text embedding pipeline
+- [x] **1.1** VectorStore integration + nomic-embed-text embedding pipeline
 - [ ] **1.2** Intent extraction via local LLM (phi3.5)
 - [ ] **1.3** Context retrieval integration
 - [ ] **1.4** User profile manager
@@ -675,7 +767,10 @@ tbyd/
 │   ├── intent/
 │   │   └── extractor.go     ← Local LLM intent extraction
 │   ├── retrieval/
-│   │   └── lancedb.go       ← Vector search
+│   │   ├── vectorstore.go   ← VectorStore interface
+│   │   ├── store.go         ← SQLite brute-force implementation
+│   │   ├── embedder.go      ← Ollama embedding client
+│   │   └── retriever.go     ← Semantic search orchestration
 │   ├── composer/
 │   │   └── prompt.go        ← Prompt composition
 │   ├── ingest/
@@ -696,7 +791,11 @@ tbyd/
 │   ├── ollama/
 │   │   └── client.go        ← Ollama lifecycle + API client
 │   └── config/
-│       └── config.go        ← TOML config loading
+│       ├── config.go        ← Config loading + keychain
+│       ├── backend.go       ← ConfigBackend interface
+│       ├── backend_darwin.go ← UserDefaults (com.tbyd.app)
+│       ├── backend_other.go  ← XDG JSON file backend
+│       └── keys.go          ← Key specs + env overrides
 ├── macos/                   ← SwiftUI macOS app (Xcode project)
 │   ├── App/
 │   │   ├── MenubarApp.swift
@@ -716,7 +815,7 @@ tbyd/
 │   └── architecture.md
 ├── go.mod
 ├── go.sum
-└── .tbyd.toml.example
+└── config.toml.example       ← Deprecated; documents env vars and defaults CLI
 ```
 
 ---
@@ -745,6 +844,14 @@ After implementation, test end-to-end:
    - Enable network logging (Charles Proxy / Wireshark)
    - Verify only enriched prompts reach OpenRouter, not unintended raw data
 
-6. **Local-only mode test:**
-   - Configure a "private" query prefix
-   - Verify marked queries are routed directly to cloud with no local storage
+6. **Bypass mode test:**
+   - Set a request header or config flag to enable bypass (no_enrich) mode
+   - Verify marked queries are forwarded to cloud unchanged, with no enrichment and no local storage
+
+7. **Localhost auth test:**
+   - Verify `POST /ingest` without bearer token returns 401
+   - Verify `POST /v1/chat/completions` works without token (OpenAI compat)
+
+8. **Data lifecycle test:**
+   - `tbyd data export` produces valid JSONL
+   - `tbyd data purge --confirm` removes all data; verify empty state
