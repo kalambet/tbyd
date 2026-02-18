@@ -97,8 +97,8 @@ func (b *fileBackend) GetInt(key string) (int, bool, error) {
 	}
 	switch val := v.(type) {
 	case float64:
-		if val != math.Trunc(val) {
-			return 0, true, fmt.Errorf("non-integer value %v for %s", val, key)
+		if val < math.MinInt || val > math.MaxInt || val != math.Trunc(val) {
+			return 0, true, fmt.Errorf("value %v for %s is not a valid integer or is out of range", val, key)
 		}
 		return int(val), true, nil
 	case string:

@@ -373,6 +373,7 @@ All non-OpenAI endpoints (`/ingest`, `/profile`, `/interactions`, MCP) require a
 - On first run: generate a random 256-bit token, store in the platform secret store under `tbyd-api-token`
   - **macOS:** Keychain via `security` CLI
   - **Linux:** `$XDG_DATA_HOME/tbyd/secrets.json` (0600 permissions; future: `libsecret`)
+    - ⚠️ **Security note:** plaintext file storage is a temporary placeholder. It can be exposed via backups, file transfers, or diagnostics. Migrating to `libsecret`/`gnome-keyring` is high-priority technical debt. Linux users should prefer environment variables for secrets until then.
 - All requests to management endpoints must include `Authorization: Bearer <token>`
 - OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`) are unauthenticated (to maintain compatibility with third-party clients) but bound strictly to `127.0.0.1`
 - Browser extension and Share Extension read the token from Keychain / App Group (macOS)
