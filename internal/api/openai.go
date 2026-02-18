@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/kalambet/tbyd/internal/proxy"
 )
+
+const maxRequestBodySize = 1 << 20 // 1MB
 
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
 // REST API in passthrough mode.
@@ -47,7 +50,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 
 func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		defer r.Body.Close()
 
 		var req proxy.ChatRequest
@@ -111,6 +114,8 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 				if marshalErr == nil {
 					fmt.Fprintf(w, "data: %s\n\n", errPayload)
 					flusher.Flush()
+				} else {
+					log.Printf("failed to marshal stream error payload: %v", marshalErr)
 				}
 			}
 			break

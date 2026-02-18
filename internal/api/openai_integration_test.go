@@ -66,7 +66,10 @@ func TestPassthroughRoundTrip(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("reading error body: %v", err)
+		}
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
 	}
 
