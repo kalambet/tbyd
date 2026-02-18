@@ -21,7 +21,13 @@ func TestPassthroughRoundTrip(t *testing.T) {
 			// Verify the request was forwarded correctly.
 			var req proxy.ChatRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Errorf("upstream decode error: %v", err)
+            if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+                r.Body.Close()
+                t.Errorf("upstream decode error: %v", err)
+                http.Error(w, "bad request", http.StatusBadRequest)
+                return
+            }
+            defer r.Body.Close()
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
