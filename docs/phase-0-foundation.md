@@ -54,6 +54,7 @@
     Ollama   OllamaConfig
     Storage  StorageConfig
     Proxy    ProxyConfig
+    Log      LogConfig
   }
   type ServerConfig struct {
     Port int    // default 4000
@@ -77,6 +78,14 @@
 - Override any field from environment variables (e.g. `TBYD_OPENROUTER_API_KEY`)
 - Add `config.toml.example` to repo root with all fields documented
 - Store `OpenRouterAPIKey` in macOS Keychain via `security` CLI on first run; read from Keychain at runtime (fallback to env var)
+- On first run, generate a random 256-bit API token and store in Keychain under `tbyd-api-token`
+- Add `GetAPIToken() (string, error)` to config that reads from Keychain
+- Add `LogConfig` to `Config` struct:
+  ```go
+  type LogConfig struct {
+      Level string // default "info"
+  }
+  ```
 
 **Unit tests** (`internal/config/config_test.go`):
 - `TestDefaults` — load with empty config file; verify all defaults are applied correctly
@@ -84,6 +93,7 @@
 - `TestMissingRequiredField` — load with no API key anywhere; verify error message mentions the missing field
 - `TestTOMLParsing` — load from a temp file with all fields set; verify each field is read correctly
 - `TestKeychainFallback` — mock `security` CLI; verify Keychain read is attempted before env var
+- `TestAPITokenGenerated` — first call generates token; second call returns same token
 
 **Acceptance criteria:**
 - Config loads without error from example file
@@ -100,7 +110,8 @@
 - Add dependency: `go get modernc.org/sqlite`
 - Create `internal/storage/sqlite.go` with:
   - `Open(dataDir string) (*Store, error)` — opens/creates the database file
-  - Migration runner: applies versioned SQL files in order
+     - Set pragmas on open: `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`
+   - Migration runner: applies versioned SQL files in order
 - Create `internal/storage/migrations/` with initial migration `001_initial.sql`:
   ```sql
   CREATE TABLE IF NOT EXISTS schema_version (
@@ -115,6 +126,7 @@
       enriched_prompt TEXT,
       cloud_model TEXT,
       cloud_response TEXT,
+      status TEXT NOT NULL DEFAULT 'completed',
       feedback_score INTEGER DEFAULT 0,
       feedback_notes TEXT,
       vector_ids TEXT DEFAULT '[]'
@@ -135,6 +147,37 @@
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       vector_id TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS context_vectors (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      text_chunk TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]'
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_context_vectors_source_id ON context_vectors(source_id);
+  CREATE INDEX IF NOT EXISTS idx_context_vectors_source_type ON context_vectors(source_type);
+
+  CREATE INDEX IF NOT EXISTS idx_interactions_feedback ON interactions(feedback_score);
+  CREATE INDEX IF NOT EXISTS idx_interactions_created ON interactions(created_at);
+
+  CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 3,
+      run_after DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_error TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_jobs_status_run_after ON jobs(status, run_after);
   ```
 - Implement `Store` methods:
   - `SaveInteraction(i Interaction) error`
@@ -147,6 +190,10 @@
   - `SaveContextDoc(doc ContextDoc) error`
   - `GetContextDoc(id string) (ContextDoc, error)`
   - `ListContextDocs(limit int) ([]ContextDoc, error)`
+   - `EnqueueJob(job Job) error`
+   - `ClaimNextJob(types []string) (*Job, error)`
+   - `CompleteJob(id string) error`
+   - `FailJob(id string, err string) error`
 
 **Unit tests** (`internal/storage/sqlite_test.go`) — use in-memory SQLite (`:memory:`):
 - `TestMigrationsIdempotent` — run `Open()` twice on the same path; verify schema_version count stays correct
@@ -158,6 +205,9 @@
 - `TestProfileKeyRoundTrip` — set a key, get it back, verify exact match
 - `TestGetAllProfileKeys` — set 5 keys, call `GetAllProfileKeys`, verify map has all 5
 - `TestSaveAndListContextDocs` — save 3 docs, call `ListContextDocs(2)`, verify 2 returned
+- `TestEnqueueAndClaimJob` — enqueue a job, claim it, verify fields match
+- `TestClaimJob_RespectRunAfter` — enqueue with future `run_after`; verify not claimed yet
+- `TestFailJob_IncrementsAttempts` — fail a job; verify attempts incremented
 
 **Acceptance criteria:**
 - `go test ./internal/storage/...` passes (in-memory SQLite for tests)

@@ -4,14 +4,13 @@
 
 ---
 
-## Issue 1.1 — LanceDB integration and embedding pipeline
+## Issue 1.1 — Vector store integration and embedding pipeline
 
-**Context:** Context retrieval is based on semantic search over stored embeddings. LanceDB is the embedded vector store; `nomic-embed-text` via Ollama generates the embeddings.
+**Context:** Context retrieval is based on semantic search over stored embeddings. The VectorStore interface abstracts vector storage. The default backend stores embeddings as BLOBs in SQLite with brute-force cosine similarity search, sufficient for ~100K vectors. `nomic-embed-text` via Ollama generates the embeddings.
 
 **Tasks:**
-- Evaluate LanceDB Go SDK availability (`github.com/lancedb/lancedb-go`); if not mature, use LanceDB HTTP API (LanceDB can run as a standalone HTTP server alongside Ollama)
-- Create `internal/retrieval/lancedb.go` with:
-  - `Store` struct with connection to LanceDB
+- Create `internal/retrieval/store.go` with:
+  - `Store` struct with connection to VectorStore (SQLite backend)
   - `CreateTable(name string, schema Schema) error`
   - `Insert(table string, records []Record) error`
   - `Search(table string, vector []float32, topK int, filter string) ([]Record, error)`
@@ -23,17 +22,17 @@
   - `Embed(text string) ([]float32, error)` — calls Ollama `nomic-embed-text`
   - `EmbedBatch(texts []string) ([][]float32, error)` — batch embedding for ingestion
 - Create `internal/retrieval/retriever.go`:
-  - `Retrieve(query string, topK int) ([]ContextChunk, error)` — embeds query, searches LanceDB, returns ranked chunks
+  - `Retrieve(query string, topK int) ([]ContextChunk, error)` — embeds query, searches VectorStore, returns ranked chunks
   - `RetrieveByIDs(ids []string) ([]ContextChunk, error)`
-- On startup: initialize LanceDB tables if not present
+- On startup: initialize VectorStore tables if not present
 
 **Unit tests** (`internal/retrieval/embedder_test.go`) — mock `ollama.Client`:
-- `TestEmbed_ReturnsDimension` — mock returns a 384-dim vector; verify length
+- `TestEmbed_ReturnsDimension` — mock returns a 768-dim vector; verify length
 - `TestEmbed_OllamaError` — mock returns error; verify error propagated (not panicked)
 - `TestEmbedBatch_CountMatches` — call with 3 texts; verify 3 vectors returned
 - `TestEmbedBatch_EmptyInput` — call with nil slice; verify empty result (not error)
 
-**Unit tests** (`internal/retrieval/lancedb_test.go`) — use a temp LanceDB directory:
+**Unit tests** (`internal/retrieval/store_test.go`) — use an in-memory SQLite:
 - `TestInsertAndSearch` — insert a record with a known vector; search with the same vector; verify record returned with score > 0.99
 - `TestSearch_TopK` — insert 10 records; search with topK=3; verify exactly 3 returned
 - `TestSearch_EmptyTable` — search before any inserts; verify empty slice (not error)
@@ -45,7 +44,7 @@
 
 **Acceptance criteria:**
 - Can insert a text chunk and retrieve it by semantic similarity
-- `go test ./internal/retrieval/...` passes with a test instance of LanceDB
+- `go test ./internal/retrieval/...` passes with in-memory SQLite (`:memory:`)
 - Embedding round-trip latency < 200ms for a single sentence on Apple Silicon
 
 ---
@@ -101,14 +100,15 @@
 
 ## Issue 1.3 — Context retrieval integration
 
-**Context:** Using extracted intent + original query, retrieve the most relevant stored context chunks from LanceDB. The retrieval step combines semantic search with metadata filtering.
+**Context:** Using extracted intent + original query, retrieve the most relevant stored context chunks from the VectorStore. The retrieval step combines semantic search with metadata filtering.
 
 **Tasks:**
 - Extend `internal/retrieval/retriever.go`:
   - `RetrieveForIntent(query string, intent Intent, topK int) ([]ContextChunk, error)`:
     1. Embed original query
     2. If intent has entities: also embed each entity separately and merge results
-    3. Filter by `intent.Topics` if present (LanceDB filter expression)
+    3. Filter by `intent.Topics` if present (VectorStore filter expression (structured fields, not free-form SQL))
+       > Note: SQLite VectorStore backend currently ignores filter strings; filtering is best-effort via metadata matching. Full filter support comes with the LanceDB migration.
     4. Deduplicate by `source_id`
     5. Return top-K ranked by score
   - `ContextChunk` struct: `{ID, SourceID, SourceType, Text, Score, Tags, CreatedAt}`
@@ -243,7 +243,7 @@
 - `TestEnrich_DurationTracked` — mock retriever adds 100ms delay; verify `EnrichmentDurationMs >= 100`
 - `TestEnrich_ContextCancelled` — cancel context before call; verify function returns promptly
 
-**Integration test** (`internal/pipeline/enrichment_integration_test.go`) — tag `integration`, requires Ollama + LanceDB:
+**Integration test** (`internal/pipeline/enrichment_integration_test.go`) — tag `integration`, requires Ollama:
 - `TestEnrichEndToEnd` — insert a context doc, run enrichment for a related query, verify the doc's text appears in the composed system message
 
 **Acceptance criteria:**
@@ -257,7 +257,7 @@
 
 Run this checklist before declaring Phase 1 complete:
 
-1. Add a context document manually to LanceDB (via test script or SQLite insert)
+1. Add a context document manually to the VectorStore (via test script or SQLite insert)
 2. Send a related query via `curl` → verify the enriched prompt in the interaction log contains the context
 3. Send an unrelated query → verify no spurious context is injected
 4. Kill Ollama mid-request → verify the proxy gracefully falls back to passthrough

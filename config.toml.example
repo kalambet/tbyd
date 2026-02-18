@@ -19,3 +19,6 @@
 # Required: set via file, env (TBYD_OPENROUTER_API_KEY), or macOS Keychain.
 # openrouter_api_key = ""
 # default_model = "anthropic/claude-opus-4"
+
+[log]
+# level = "info"              # "info" or "debug"

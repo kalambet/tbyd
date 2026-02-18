@@ -37,12 +37,13 @@
 - On first launch (no config file found): show onboarding wizard in SwiftUI
 - Onboarding steps:
   1. **Welcome** — one-screen explanation of what the app does and what data stays local
-  2. **Prerequisites check** — verify Ollama is installed; if not, show install link and "Check again" button; if yes, green checkmark
+  2. **Prerequisites check** — verify Ollama is installed; if not, show install link and "Check again" button; if yes, green checkmark. Note: tbyd requires Ollama to be running — it does not manage the Ollama process
   3. **API key setup** — OpenRouter API key field with link to get one; stores in Keychain on save; verifies by calling `GET /v1/models`
-  4. **Model download** — shows download progress for `phi3.5` and `nomic-embed-text` (Ollama pull); skippable with "use later" option
-  5. **Profile quick-start** — 3 optional fields: role/title, primary domain, communication preference (dropdown); "Skip" available
-  6. **Data collection consent** — clear explanation of what's stored and where; toggle for `save_interactions`; "I understand, continue" button
-  7. **Done** — shows MCP setup snippet for Claude Code; "Open Data Browser"; "Start using tbyd"
+  4. **API token generation** — generate localhost bearer token, store in Keychain, show token for browser extension setup
+  5. **Model download** — shows download progress for `phi3.5` and `nomic-embed-text` (Ollama pull); skippable with "use later" option
+  6. **Profile quick-start** — 3 optional fields: role/title, primary domain, communication preference (dropdown); "Skip" available
+  7. **Data collection consent** — clear explanation of what's stored and where; toggle for `save_interactions`; "I understand, continue" button
+  8. **Done** — shows MCP setup snippet for Claude Code; "Open Data Browser"; "Start using tbyd"
 - Mark onboarding complete in config: `[app] onboarding_complete = true`
 - CLI equivalent: `tbyd setup` walks through the same steps in the terminal
 
@@ -70,13 +71,14 @@
 **Tasks:**
 - Evaluate options:
   - **SQLite encryption**: `SQLCipher` (CGO — undesirable); `go-sqlcipher` wrapper; or **file-level encryption**
-  - **Recommended approach**: encrypt the SQLite file and LanceDB directory at the OS level using macOS Data Protection
+  - **Recommended approach**: encrypt the SQLite database file at the OS level using macOS Data Protection
     - Create `~/Library/Application Support/<name>/` with protection class `NSFileProtectionComplete`
     - This ensures data is unreadable when device is locked (macOS FileVault must be enabled)
     - Zero implementation overhead; no CGO
 - For users without FileVault:
   - Warn during onboarding: "Enable FileVault for full data protection"
   - Store API keys in macOS Keychain (already done in Issue 0.2)
+  - The localhost API bearer token is stored in macOS Keychain alongside the OpenRouter API key
   - Do NOT store API keys in config file
 - For sensitive content flagged by user (future extension):
   - Allow per-document encryption using `golang.org/x/crypto/nacl/secretbox`
@@ -199,6 +201,8 @@
   - How to export/delete all data
 - `docs/mcp-setup.md` — step-by-step Claude Code MCP integration
 - `docs/fine-tuning.md` — how to prepare data and run fine-tuning
+- `docs/vectorstore-migration.md` — Vector store migration guide (SQLite → LanceDB)
+- `docs/security.md` — Localhost auth model, Keychain usage, CSRF prevention
 - `CONTRIBUTING.md` — dev setup, testing, PR process
 - In-app help: "?" button in each SwiftUI view links to relevant docs section
 
@@ -226,3 +230,4 @@
 8. `go test -tags integration ./...` passes
 9. Swift tests pass: `xcodebuild test -scheme tbyd -destination 'platform=macOS'`
 10. Documentation tests pass: `bash docs/tests/test_readme_links.sh`
+11. Verify bearer token is stored in Keychain, not in config file
