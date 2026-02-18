@@ -88,7 +88,11 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-		r.Embedding = decodeFloat32s(blob)
+		embedding, err := decodeFloat32s(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
+		}
+		r.Embedding = embedding
 		t, err := time.Parse(time.RFC3339, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("parsing created_at: %w", err)
@@ -153,7 +157,11 @@ func (s *SQLiteStore) ExportAll(table string) ([]Record, error) {
 		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-		r.Embedding = decodeFloat32s(blob)
+		embedding, err := decodeFloat32s(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
+		}
+		r.Embedding = embedding
 		t, err := time.Parse(time.RFC3339, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("parsing created_at: %w", err)
@@ -199,7 +207,11 @@ func (s *SQLiteStore) GetByIDs(ctx context.Context, table string, ids []string) 
 		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-		r.Embedding = decodeFloat32s(blob)
+		embedding, err := decodeFloat32s(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
+		}
+		r.Embedding = embedding
 		t, err := time.Parse(time.RFC3339, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("parsing created_at for id %s: %w", r.ID, err)
@@ -220,17 +232,17 @@ func encodeFloat32s(v []float32) []byte {
 }
 
 // decodeFloat32s deserializes little-endian bytes back to a float32 slice.
-// Panics if the byte slice length is not a multiple of 4 (indicates data corruption).
-func decodeFloat32s(b []byte) []float32 {
+// Returns an error if the byte slice length is not a multiple of 4 (indicates data corruption).
+func decodeFloat32s(b []byte) ([]float32, error) {
 	if len(b)%4 != 0 {
-		panic(fmt.Sprintf("byte slice length %d is not a multiple of 4", len(b)))
+		return nil, fmt.Errorf("byte slice length %d is not a multiple of 4", len(b))
 	}
 	n := len(b) / 4
 	v := make([]float32, n)
 	for i := range v {
 		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
 	}
-	return v
+	return v, nil
 }
 
 // norm returns the L2 norm of a vector.

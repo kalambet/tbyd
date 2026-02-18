@@ -21,6 +21,7 @@ All vector operations go through the `VectorStore` interface:
 type VectorStore interface {
     Insert(table string, records []Record) error
     Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error)
+    GetByIDs(ctx context.Context, table string, ids []string) ([]Record, error)
     Delete(table string, id string) error
     CreateTable(name string) error
     ExportAll(table string) ([]Record, error)
