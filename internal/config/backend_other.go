@@ -5,10 +5,27 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 )
+
+func defaultDataDir() string {
+	dir := os.Getenv("XDG_DATA_HOME")
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, ".local", "share")
+		} else {
+			return "tbyd-data"
+		}
+	}
+	return filepath.Join(dir, "tbyd")
+}
+
+func apiKeyHint() string {
+	return ""
+}
 
 // fileBackend stores config as a flat JSON object in an XDG-compatible path.
 // This is the default for Linux and other non-macOS platforms.
@@ -39,9 +56,14 @@ func configFilePath() string {
 func (b *fileBackend) load() {
 	data, err := os.ReadFile(b.path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[WARN] could not read config file %s: %v. Using default values.\n", b.path, err)
+		}
 		return
 	}
-	_ = json.Unmarshal(data, &b.data)
+	if err := json.Unmarshal(data, &b.data); err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] could not parse config file %s: %v. Using default values.\n", b.path, err)
+	}
 }
 
 func (b *fileBackend) save() error {
@@ -75,6 +97,9 @@ func (b *fileBackend) GetInt(key string) (int, bool, error) {
 	}
 	switch val := v.(type) {
 	case float64:
+		if val != math.Trunc(val) {
+			return 0, true, fmt.Errorf("non-integer value %v for %s", val, key)
+		}
 		return int(val), true, nil
 	case string:
 		i, err := strconv.Atoi(val)

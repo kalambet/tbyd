@@ -22,5 +22,6 @@
 #   TBYD_PROXY_DEFAULT_MODEL=anthropic/claude-opus-4
 #   TBYD_OPENROUTER_API_KEY=<your-key>
 #
-# Secrets (API keys) are stored in macOS Keychain, not UserDefaults:
-#   security add-generic-password -s tbyd -a openrouter_api_key -w "<your-key>"
+# Secrets (API keys) are stored in a platform secret store, not UserDefaults/config:
+#   macOS:  security add-generic-password -s tbyd -a openrouter_api_key -w "<your-key>"
+#   Linux:  export TBYD_OPENROUTER_API_KEY="<your-key>"

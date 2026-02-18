@@ -3,13 +3,27 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 const defaultsDomain = "com.tbyd.app"
+
+func defaultDataDir() string {
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(homeDir, "Library", "Application Support", "tbyd")
+	}
+	return "tbyd-data"
+}
+
+func apiKeyHint() string {
+	return " or macOS Keychain (service: tbyd, account: openrouter_api_key)"
+}
 
 type darwinBackend struct {
 	domain string
@@ -24,10 +38,11 @@ func (b *darwinBackend) read(key string) (string, bool, error) {
 	out, err := cmd.CombinedOutput()
 	s := strings.TrimSpace(string(out))
 	if err != nil {
-		if strings.Contains(s, "does not exist") {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return "", false, nil
 		}
-		return "", false, err
+		return "", false, fmt.Errorf("reading default for key '%s': %w, output: %s", key, err, s)
 	}
 	return s, true, nil
 }

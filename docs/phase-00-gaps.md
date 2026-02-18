@@ -179,29 +179,30 @@
 
 ---
 
-## Issue 00.7 — API token generation and Keychain storage
+## Issue 00.7 — API token generation and platform secret store
 
-**Context:** All non-OpenAI endpoints need bearer token auth to prevent CSRF attacks from malicious web pages targeting localhost. The token is generated on first run and stored in Keychain.
+**Context:** All non-OpenAI endpoints need bearer token auth to prevent CSRF attacks from malicious web pages targeting localhost. The token is generated on first run and stored in the platform secret store (macOS Keychain; on Linux, a file with restricted permissions until `libsecret` support is added).
 
 **Tasks:**
 - Add to `internal/config/config.go`:
-  - `GetAPIToken(kc keychain) (string, error)` — reads `tbyd-api-token` from Keychain; if not found, generates a random 256-bit (32-byte) hex-encoded token, stores it in Keychain, and returns it
-- Add Keychain write support:
+  - `GetAPIToken(kc keychain) (string, error)` — reads `tbyd-api-token` from the secret store; if not found, generates a random 256-bit (32-byte) hex-encoded token, stores it, and returns it
+- Add secret store write support:
   - `keychain` interface: add `Set(service, account, value string) error`
-  - `keychainReader` → rename to `keychainClient` and add `Set` using `security add-generic-password` CLI
-  - Update `keychain_darwin.go` and `keychain_other.go` accordingly
+  - `keychainReader` → rename to `keychainClient` and add `Set`:
+    - **macOS** (`keychain_darwin.go`): `security add-generic-password` CLI
+    - **Linux** (`keychain_other.go`): write to `$XDG_DATA_HOME/tbyd/secrets.json` with `0600` permissions (placeholder until `libsecret` support)
 - Call `GetAPIToken()` in `main.go` at startup and log (at info level) that the token is available
 
 **Tests** (`internal/config/config_test.go`):
 - Extend `mockKeychain` with a `Set` method and an in-memory map
-- `TestGetAPIToken_GeneratesOnFirstCall` — empty Keychain mock; call `GetAPIToken`; verify non-empty 64-char hex string returned; verify `Set` was called
+- `TestGetAPIToken_GeneratesOnFirstCall` — empty mock; call `GetAPIToken`; verify non-empty 64-char hex string returned; verify `Set` was called
 - `TestGetAPIToken_ReturnsExisting` — pre-populate mock with token; call `GetAPIToken`; verify same token returned; verify `Set` was NOT called
 - `TestGetAPIToken_Deterministic` — call twice with same mock; verify same token both times
 
 **Acceptance criteria:**
 - `go test ./internal/config/...` passes
 - Token is 64 hex chars (32 bytes)
-- Token persists across restarts (stored in Keychain)
+- Token persists across restarts (stored in platform secret store)
 
 ---
 

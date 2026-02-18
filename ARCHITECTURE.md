@@ -315,7 +315,7 @@ Profile schema:
 - Embeddings for the above
 
 **What is NEVER stored:**
-- Raw API keys (stored in macOS Keychain)
+- Raw API keys (stored in platform secret store: macOS Keychain / Linux env vars)
 - Session data from other apps
 - Data from intercepted traffic beyond what user explicitly routes through TBYD
 
@@ -368,13 +368,15 @@ Profile schema:
 
 ## Localhost Security
 
-All non-OpenAI endpoints (`/ingest`, `/profile`, `/interactions`, MCP) require authentication via a **bearer token** generated on first run and stored in macOS Keychain.
+All non-OpenAI endpoints (`/ingest`, `/profile`, `/interactions`, MCP) require authentication via a **bearer token** generated on first run and stored in the platform secret store.
 
-- On first run: generate a random 256-bit token, store in Keychain under `tbyd-api-token`
+- On first run: generate a random 256-bit token, store in the platform secret store under `tbyd-api-token`
+  - **macOS:** Keychain via `security` CLI
+  - **Linux:** `$XDG_DATA_HOME/tbyd/secrets.json` (0600 permissions; future: `libsecret`)
 - All requests to management endpoints must include `Authorization: Bearer <token>`
 - OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`) are unauthenticated (to maintain compatibility with third-party clients) but bound strictly to `127.0.0.1`
-- Browser extension and Share Extension read the token from Keychain / App Group
-- CLI reads the token from Keychain automatically
+- Browser extension and Share Extension read the token from Keychain / App Group (macOS)
+- CLI reads the token from the secret store automatically
 
 This prevents CSRF-style attacks from malicious web pages targeting `localhost`.
 
@@ -691,15 +693,24 @@ Each phase has a detailed issue breakdown in `docs/`:
 | Phase 5 | [docs/phase-5-polish-distribution.md](docs/phase-5-polish-distribution.md) | Project rename, onboarding, encryption, Homebrew, App Store |
 
 ### Phase 0 — Foundation
-- [ ] **0.1** Go module init and project layout
-- [ ] **0.2** Config loader (UserDefaults + Keychain for API keys)
-- [ ] **0.3** SQLite storage: schema and migrations
-- [ ] **0.4** Ollama lifecycle manager
-- [ ] **0.5** OpenRouter HTTP client (passthrough)
-- [ ] **0.6** OpenAI-compatible REST API server (passthrough mode)
+- [x] **0.1** Go module init and project layout
+- [x] **0.2** Config loader (UserDefaults + Keychain for API keys)
+- [x] **0.3** SQLite storage: schema and migrations
+- [x] **0.4** Ollama lifecycle manager
+- [x] **0.5** OpenRouter HTTP client (passthrough)
+- [x] **0.6** OpenAI-compatible REST API server (passthrough mode)
+
+### Phase 00 — Foundation Gaps
+- [ ] **00.1** Add `LogConfig` to config
+- [ ] **00.2** Add `status` column to `interactions` table
+- [ ] **00.3** Add indexes to `interactions` table
+- [ ] **00.4** Add `context_vectors` table to migration
+- [ ] **00.5** Add `jobs` table and model
+- [ ] **00.6** Add job queue methods to Store
+- [ ] **00.7** API token generation and platform secret store
 
 ### Phase 1 — Basic Enrichment
-- [ ] **1.1** VectorStore integration + nomic-embed-text embedding pipeline
+- [x] **1.1** VectorStore integration + nomic-embed-text embedding pipeline
 - [ ] **1.2** Intent extraction via local LLM (phi3.5)
 - [ ] **1.3** Context retrieval integration
 - [ ] **1.4** User profile manager

@@ -103,7 +103,8 @@ for i := 0; i < len(records); i += 1000 {
 
 ### Step 4: Switch in config
 
-Add config keys to select the backend (UserDefaults on macOS, XDG JSON on Linux):
+Add config keys to select the backend (UserDefaults on macOS, XDG JSON on Linux).
+These keys are **planned for Phase 4** — add them to `keys.go` when implementing the migration:
 
 ```bash
 # macOS

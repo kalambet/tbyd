@@ -2,8 +2,6 @@ package config
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -36,10 +34,7 @@ type ProxyConfig struct {
 }
 
 func defaults() Config {
-	dataDir := "tbyd-data"
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		dataDir = filepath.Join(homeDir, "Library", "Application Support", "tbyd")
-	}
+	dataDir := defaultDataDir()
 	return Config{
 		Server: ServerConfig{
 			Port:    4000,
@@ -61,13 +56,14 @@ func defaults() Config {
 }
 
 // Load reads configuration from the platform-native backend, environment
-// variables, and macOS Keychain.
+// variables, and platform secret store.
 //
-// On macOS the backend is UserDefaults (domain: com.tbyd.app).
-// On Linux the backend is a JSON file at $XDG_CONFIG_HOME/tbyd/config.json.
+// On macOS the backend is UserDefaults (domain: com.tbyd.app) and secrets
+// fall back to macOS Keychain.
+// On Linux the backend is a JSON file at $XDG_CONFIG_HOME/tbyd/config.json
+// and secrets must be provided via environment variables.
 //
-// Environment variables (TBYD_*) override backend values.
-// Keychain is checked for the API key as a final fallback.
+// Environment variables (TBYD_*) override backend values on all platforms.
 func Load() (Config, error) {
 	return loadWith(newPlatformBackend(), keychainReader{})
 }
@@ -86,7 +82,7 @@ func loadWith(b ConfigBackend, kc keychain) (Config, error) {
 
 	applyEnvOverrides(&cfg)
 
-	// Try macOS Keychain for API key if still empty.
+	// Try platform keychain for API key if still empty.
 	if cfg.Proxy.OpenRouterAPIKey == "" {
 		if key, err := kc.Get("tbyd", "openrouter_api_key"); err == nil && key != "" {
 			cfg.Proxy.OpenRouterAPIKey = key
@@ -94,11 +90,10 @@ func loadWith(b ConfigBackend, kc keychain) (Config, error) {
 	}
 
 	if cfg.Proxy.OpenRouterAPIKey == "" {
-		return Config{}, fmt.Errorf(
-			"missing required config: OpenRouter API key. " +
-				"Set it via environment variable TBYD_OPENROUTER_API_KEY " +
-				"or macOS Keychain (service: tbyd, account: openrouter_api_key)",
-		)
+		msg := "missing required config: OpenRouter API key. " +
+			"Set it via environment variable TBYD_OPENROUTER_API_KEY" +
+			apiKeyHint()
+		return Config{}, fmt.Errorf("%s", msg)
 	}
 
 	return cfg, nil

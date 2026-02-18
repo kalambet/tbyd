@@ -69,11 +69,13 @@
     Log      LogConfig
   }
   ```
-  Load order: code defaults → backend overlay (skip secrets) → env overrides → Keychain fallback for API key
+  Load order: code defaults → backend overlay (skip secrets) → env overrides → platform secret store fallback
 - Override any field from environment variables (e.g. `TBYD_OPENROUTER_API_KEY`)
-- Store `OpenRouterAPIKey` in macOS Keychain via `security` CLI; read from Keychain at runtime (fallback to env var)
-- On first run, generate a random 256-bit API token and store in Keychain under `tbyd-api-token`
-- Add `GetAPIToken() (string, error)` to config that reads from Keychain
+- Secrets (API keys, tokens) are stored in a platform-specific secret store:
+  - **macOS:** Keychain via `security` CLI (service: `tbyd`)
+  - **Linux:** environment variables only (no secret store yet; future: `libsecret`/`gnome-keyring`)
+- On first run, generate a random 256-bit API token and store in the platform secret store under `tbyd-api-token`
+- Add `GetAPIToken() (string, error)` to config that reads from the secret store
 - Add `LogConfig` to `Config` struct:
   ```go
   type LogConfig struct {
@@ -93,12 +95,12 @@ defaults read com.tbyd.app   # view all settings
 - `TestBackendOverride` — populate mock backend with all fields; verify each is read correctly
 - `TestEnvOverride` — set `TBYD_OPENROUTER_API_KEY` env var; verify it overrides backend value
 - `TestMissingRequiredField` — load with no API key anywhere; verify error message mentions the missing field
-- `TestKeychainFallback` — mock keychain; verify Keychain read is attempted when API key is missing
+- `TestKeychainFallback` — mock secret store; verify platform secret store is consulted when API key is missing
 - `TestSecretNotReadFromBackend` — put API key in backend; verify it is not read (secrets never come from backend)
 - `TestAPITokenGenerated` — first call generates token; second call returns same token
 
 **Acceptance criteria:**
-- Config loads without error when backend + env + keychain provide required values
+- Config loads without error when backend + env + secret store provide required values
 - Missing required fields (API key) produce a clear error message
 - Secrets are never stored in or read from UserDefaults/JSON backend
 - `go test ./internal/config/...` passes
