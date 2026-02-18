@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -184,6 +185,27 @@ func TestChatCompletions_StreamingMidStreamError(t *testing.T) {
 	}
 	if !strings.Contains(got, `"server_error"`) {
 		t.Errorf("response missing SSE error event: %q", got)
+	}
+}
+
+func TestBindsToLoopback(t *testing.T) {
+	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
+	handler := NewOpenAIHandler(c)
+
+	srv := &http.Server{
+		Addr:    "127.0.0.1:0",
+		Handler: handler,
+	}
+
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	addr := ln.Addr().String()
+	if !strings.HasPrefix(addr, "127.0.0.1") {
+		t.Errorf("listener address = %q, want prefix 127.0.0.1", addr)
 	}
 }
 
