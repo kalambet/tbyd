@@ -1,27 +1,5 @@
 # tbyd — Architecture & System Design Plan
 
-## Project Name Candidates (Cypherpunk Vibe)
-
-The name should reflect data sovereignty, cryptographic privacy, and user agency over AI.
-All names should use lowercase to reflect the Unix/cypherpunk aesthetic.
-
-| Name | Meaning |
-|------|---------|
-| **eidolon** | Ghost/specter — your data twin that never leaves your machine |
-| **tbyd** | "Take Back Your Data" — direct, punk, clear mission statement |
-| **cipher** | Encryption/secrecy — user's context stays encrypted locally |
-| **wraith** | Ghost proxy — invisible to the cloud LLMs, present for you |
-| **datum** | The atomic unit of your data — minimalist, technical |
-| **ghost** | Ghostwriter — your local ghost that enriches every message |
-| **shade** | Shadow self — local model that knows you |
-| **veilr** | The veil between you and cloud providers |
-| **mneme** | Greek goddess of memory — your local memory layer |
-| **anima** | Your digital soul — the local model that learns to represent you |
-
-**Recommended starting point**: `eidolon` or `anima` — both evoke the concept of a persistent local digital representation of the user with cypherpunk character. Can revisit before naming the repo.
-
----
-
 ## Context
 
 Users interact with cloud LLMs (Claude, GPT, Gemini) through tools like Claude Code, Cursor, and native apps. In doing so, they:
@@ -45,10 +23,10 @@ TBYD (working title) is a **local-first data sovereignty layer** that sits betwe
 ┌───────────▼──────────────────────────────────────────────────────┐
 │                   TBYD CORE (Go binary)                          │
 │                                                                  │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐    │
-│  │  MCP Server │  │ OpenAI-compat│  │  Config & Profile    │    │
-│  │  (native)   │  │  REST API    │  │  Manager             │    │
-│  └──────┬──────┘  └──────┬───────┘  └──────────────────────┘    │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────────┐     │
+│  │  MCP Server │  │ OpenAI-compat│  │  Config & Profile    │     │
+│  │  (native)   │  │  REST API    │  │  Manager             │     │
+│  └──────┬──────┘  └──────┬───────┘  └──────────────────────┘     │
 │         └────────────────┼───────────────────┐                   │
 │                          ▼                   │                   │
 │               ┌─────────────────────┐        │                   │
