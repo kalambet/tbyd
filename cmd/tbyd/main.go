@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -63,9 +62,6 @@ func run() error {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: handler,
-		BaseContext: func(_ net.Listener) context.Context {
-			return context.Background()
-		},
 	}
 
 	// Start server in a goroutine.

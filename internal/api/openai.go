@@ -94,14 +94,16 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 		flusher.Flush()
 	}
 	if err := scanner.Err(); err != nil {
-		errPayload, _ := json.Marshal(map[string]any{
+		errPayload, marshalErr := json.Marshal(map[string]any{
 			"error": map[string]any{
 				"message": "upstream read error",
 				"type":    "server_error",
 			},
 		})
-		fmt.Fprintf(w, "data: %s\n\n", errPayload)
-		flusher.Flush()
+		if marshalErr == nil {
+			fmt.Fprintf(w, "data: %s\n\n", errPayload)
+			flusher.Flush()
+		}
 	}
 }
 
