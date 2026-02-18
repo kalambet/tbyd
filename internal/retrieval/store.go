@@ -30,6 +30,9 @@ func NewSQLiteStore(db *sql.DB) *SQLiteStore {
 	return &SQLiteStore{db: db}
 }
 
+// expectedTable is the only table name the SQLite backend supports.
+const expectedTable = "context_vectors"
+
 // Insert adds records to the context_vectors table.
 func (s *SQLiteStore) Insert(table string, records []Record) error {
 	tx, err := s.db.Begin()
@@ -61,15 +64,25 @@ func (s *SQLiteStore) Insert(table string, records []Record) error {
 	return tx.Commit()
 }
 
+// idScore holds only the ID and score during the scan phase of Search.
+// Full record details are fetched only for top-K winners.
+type idScore struct {
+	ID    string
+	Score float32
+}
+
 // Search performs brute-force cosine similarity search over all vectors,
 // returning the top-K most similar records.
 // NOTE: the filter parameter is accepted for VectorStore interface compatibility
 // but is not yet implemented in the SQLite backend. A future LanceDB backend
 // will support DataFusion SQL predicates for metadata filtering.
 func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error) {
-	rows, err := s.db.Query(`
-		SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
-		FROM context_vectors`)
+	if table != expectedTable {
+		return nil, fmt.Errorf("unsupported table %q, expected %q", table, expectedTable)
+	}
+
+	// Phase 1: scan only id + embedding to find top-K candidates.
+	rows, err := s.db.Query(`SELECT id, embedding FROM context_vectors`)
 	if err != nil {
 		return nil, fmt.Errorf("querying vectors: %w", err)
 	}
@@ -80,15 +93,69 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		return nil, nil
 	}
 
-	h := &scoredHeap{}
+	h := &idScoreHeap{}
 	heap.Init(h)
 
+	// Reusable buffer for decoding embeddings to avoid per-row allocations.
+	var buf []float32
+
 	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+
+		buf, err = decodeFloat32sInto(buf, blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding embedding for %s: %w", id, err)
+		}
+
+		score := dotProduct(vector, buf, queryNorm)
+		if h.Len() < topK {
+			heap.Push(h, idScore{ID: id, Score: score})
+		} else if score > (*h)[0].Score {
+			(*h)[0] = idScore{ID: id, Score: score}
+			heap.Fix(h, 0)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating rows: %w", err)
+	}
+
+	if h.Len() == 0 {
+		return nil, nil
+	}
+
+	// Phase 2: fetch full records only for the top-K IDs.
+	topIDs := make([]string, h.Len())
+	scores := make(map[string]float32, h.Len())
+	for i := len(topIDs) - 1; i >= 0; i-- {
+		item := heap.Pop(h).(idScore)
+		topIDs[i] = item.ID
+		scores[item.ID] = item.Score
+	}
+
+	queryArgs := make([]interface{}, len(topIDs))
+	for i, id := range topIDs {
+		queryArgs[i] = id
+	}
+	fullQuery := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
+		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(topIDs)-1) + `)`
+
+	fullRows, err := s.db.Query(fullQuery, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching top-K records: %w", err)
+	}
+	defer fullRows.Close()
+
+	var results []ScoredRecord
+	for fullRows.Next() {
 		var r Record
 		var blob []byte
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
-			return nil, fmt.Errorf("scanning row: %w", err)
+		if err := fullRows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
+			return nil, fmt.Errorf("scanning full record: %w", err)
 		}
 		embedding, err := decodeFloat32s(blob)
 		if err != nil {
@@ -100,28 +167,25 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 			return nil, fmt.Errorf("parsing created_at: %w", err)
 		}
 		r.CreatedAt = t
-
-		score := cosineSimilarity(vector, r.Embedding, queryNorm)
-		sr := ScoredRecord{Record: r, Score: score}
-
-		if h.Len() < topK {
-			heap.Push(h, sr)
-		} else if score > (*h)[0].Score {
-			(*h)[0] = sr
-			heap.Fix(h, 0)
-		}
+		results = append(results, ScoredRecord{Record: r, Score: scores[r.ID]})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating rows: %w", err)
+	if err := fullRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating full records: %w", err)
 	}
 
-	// Extract results in descending score order.
-	results := make([]ScoredRecord, h.Len())
-	for i := len(results) - 1; i >= 0; i-- {
-		results[i] = heap.Pop(h).(ScoredRecord)
-	}
+	// Sort results by score descending (IN query doesn't preserve order).
+	sortByScore(results)
 
 	return results, nil
+}
+
+// sortByScore sorts ScoredRecords by Score descending. Used for small slices (topK).
+func sortByScore(results []ScoredRecord) {
+	for i := 1; i < len(results); i++ {
+		for j := i; j > 0 && results[j].Score > results[j-1].Score; j-- {
+			results[j], results[j-1] = results[j-1], results[j]
+		}
+	}
 }
 
 // Delete removes a record by ID from the context_vectors table.
@@ -238,7 +302,7 @@ func encodeFloat32s(v []float32) []byte {
 	return buf
 }
 
-// decodeFloat32s deserializes little-endian bytes back to a float32 slice.
+// decodeFloat32s deserializes little-endian bytes into a new float32 slice.
 // Returns an error if the byte slice length is not a multiple of 4 (indicates data corruption).
 func decodeFloat32s(b []byte) ([]float32, error) {
 	if len(b)%4 != 0 {
@@ -252,6 +316,24 @@ func decodeFloat32s(b []byte) ([]float32, error) {
 	return v, nil
 }
 
+// decodeFloat32sInto decodes little-endian bytes into the provided buffer,
+// reusing it to avoid per-row allocations during search scans.
+func decodeFloat32sInto(buf []float32, b []byte) ([]float32, error) {
+	if len(b)%4 != 0 {
+		return nil, fmt.Errorf("byte slice length %d is not a multiple of 4", len(b))
+	}
+	n := len(b) / 4
+	if cap(buf) < n {
+		buf = make([]float32, n)
+	} else {
+		buf = buf[:n]
+	}
+	for i := range buf {
+		buf[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return buf, nil
+}
+
 // norm returns the L2 norm of a vector.
 func norm(v []float32) float32 {
 	var sum float64
@@ -261,9 +343,9 @@ func norm(v []float32) float32 {
 	return float32(math.Sqrt(sum))
 }
 
-// cosineSimilarity computes cosine similarity between a and b.
-// queryNorm is the precomputed norm of a.
-func cosineSimilarity(a, b []float32, queryNorm float32) float32 {
+// dotProduct computes cosine similarity as dot(a,b) / (aNorm * bNorm).
+// aNorm is the precomputed L2 norm of vector a.
+func dotProduct(a, b []float32, aNorm float32) float32 {
 	if len(a) != len(b) {
 		return 0
 	}
@@ -277,11 +359,26 @@ func cosineSimilarity(a, b []float32, queryNorm float32) float32 {
 	if bNorm == 0 {
 		return 0
 	}
-	return float32(dot / (float64(queryNorm) * bNorm))
+	return float32(dot / (float64(aNorm) * bNorm))
+}
+
+// idScoreHeap is a min-heap of idScore ordered by Score.
+// Used during the scan phase of Search to track top-K candidates by ID only.
+type idScoreHeap []idScore
+
+func (h idScoreHeap) Len() int            { return len(h) }
+func (h idScoreHeap) Less(i, j int) bool  { return h[i].Score < h[j].Score }
+func (h idScoreHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *idScoreHeap) Push(x interface{}) { *h = append(*h, x.(idScore)) }
+func (h *idScoreHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 // scoredHeap is a min-heap of ScoredRecord ordered by Score.
-// Used to maintain the top-K highest-scoring records during search.
 type scoredHeap []ScoredRecord
 
 func (h scoredHeap) Len() int            { return len(h) }
