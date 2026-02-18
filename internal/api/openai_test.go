@@ -122,6 +122,71 @@ func TestChatCompletions_MissingMessages(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_UpstreamError(t *testing.T) {
+	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"message":"internal failure","type":"server_error"}}`)
+	})
+	h := NewOpenAIHandler(c)
+
+	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadGateway)
+	}
+
+	var errResp map[string]map[string]string
+	json.NewDecoder(rr.Body).Decode(&errResp)
+	if errResp["error"]["type"] != "api_error" {
+		t.Errorf("error.type = %q, want %q", errResp["error"]["type"], "api_error")
+	}
+	if !strings.Contains(errResp["error"]["message"], "upstream error") {
+		t.Errorf("error.message = %q, want it to contain 'upstream error'", errResp["error"]["message"])
+	}
+}
+
+func TestChatCompletions_StreamingMidStreamError(t *testing.T) {
+	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// Send one valid chunk then abruptly close the connection.
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"gen-1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")
+		flusher.Flush()
+
+		// Hijack and close the raw TCP connection to cause a read error.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("upstream does not support hijacking")
+		}
+		conn, _, _ := hj.Hijack()
+		conn.Close()
+	})
+	h := NewOpenAIHandler(c)
+
+	body := `{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	got := rr.Body.String()
+	if !strings.Contains(got, `"Hi"`) {
+		t.Errorf("response missing first chunk: %q", got)
+	}
+	if !strings.Contains(got, `"server_error"`) {
+		t.Errorf("response missing SSE error event: %q", got)
+	}
+}
+
 func TestModels(t *testing.T) {
 	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
