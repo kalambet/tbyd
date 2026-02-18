@@ -176,7 +176,7 @@ func TestBindsToLoopback(t *testing.T) {
 	}
 
 	srv := &http.Server{Handler: h}
-	go srv.ListenAndServe() // will fail since ln occupies port — that's fine
+    // go srv.ListenAndServe() // will fail since ln occupies port — that's fine
 	defer srv.Shutdown(context.Background())
 
 	// Verify we can reach the handler via the loopback listener.
