@@ -105,6 +105,7 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 		}
 		if err != nil {
 			if err != io.EOF {
+				log.Printf("upstream stream read error: %v", err)
 				errPayload, marshalErr := json.Marshal(map[string]any{
 					"error": map[string]any{
 						"message": "upstream read error",
@@ -142,7 +143,6 @@ func httpError(w http.ResponseWriter, code int, errType string, format string, a
 		"error": map[string]any{
 			"message": msg,
 			"type":    errType,
-			"code":    code,
 		},
 	})
 }

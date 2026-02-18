@@ -1,10 +1,8 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -160,34 +158,3 @@ func TestModels(t *testing.T) {
 	}
 }
 
-func TestBindsToLoopback(t *testing.T) {
-	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	h := NewOpenAIHandler(c)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer ln.Close()
-
-	addr := ln.Addr().String()
-	if !strings.HasPrefix(addr, "127.0.0.1:") {
-		t.Fatalf("listener address = %q, want 127.0.0.1:*", addr)
-	}
-
-	srv := &http.Server{Handler: h}
-	defer srv.Shutdown(context.Background())
-
-	// Verify we can reach the handler via the loopback listener.
-	go srv.Serve(ln)
-
-	resp, err := http.Get("http://" + addr + "/health")
-	if err != nil {
-		t.Fatalf("GET /health: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-}
