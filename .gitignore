@@ -1,0 +1,58 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Xcode
+macos/*.xcodeproj/xcuserdata/
+macos/*.xcworkspace/xcuserdata/
+macos/DerivedData/
+macos/*.ipa
+macos/*.dSYM.zip
+macos/*.dSYM
+
+# Config overrides (never commit real keys)
+tbyd.toml
+.tbyd.toml
+config.toml
+
+# Runtime files
+*.pid
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

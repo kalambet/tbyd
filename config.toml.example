@@ -1,0 +1,21 @@
+# tbyd configuration
+# Copy this file to ~/.config/tbyd/config.toml and adjust values.
+# Environment variables (prefixed TBYD_) override file values.
+
+[server]
+# port = 4000            # HTTP API port
+# mcp_port = 4001        # MCP server port
+
+[ollama]
+# base_url = "http://localhost:11434"
+# fast_model = "phi3.5"
+# deep_model = "mistral-nemo"
+# embed_model = "nomic-embed-text"
+
+[storage]
+# data_dir = "$HOME/Library/Application Support/tbyd"
+
+[proxy]
+# Required: set via file, env (TBYD_OPENROUTER_API_KEY), or macOS Keychain.
+# openrouter_api_key = ""
+# default_model = "anthropic/claude-opus-4"
