@@ -34,8 +34,19 @@ func NewSQLiteStore(db *sql.DB) *SQLiteStore {
 // expectedTable is the only table name the SQLite backend supports.
 const expectedTable = "context_vectors"
 
+func validateTable(table string) error {
+	if table != expectedTable {
+		return fmt.Errorf("unsupported table %q, expected %q", table, expectedTable)
+	}
+	return nil
+}
+
 // Insert adds records to the context_vectors table.
 func (s *SQLiteStore) Insert(table string, records []Record) error {
+	if err := validateTable(table); err != nil {
+		return err
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("beginning insert transaction: %w", err)
@@ -78,8 +89,11 @@ type idScore struct {
 // but is not yet implemented in the SQLite backend. A future LanceDB backend
 // will support DataFusion SQL predicates for metadata filtering.
 func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error) {
-	if table != expectedTable {
-		return nil, fmt.Errorf("unsupported table %q, expected %q", table, expectedTable)
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
+	if topK <= 0 {
+		return nil, nil
 	}
 
 	// Phase 1: scan only id + embedding to find top-K candidates.
@@ -189,6 +203,9 @@ func sortByScore(results []ScoredRecord) {
 
 // Delete removes a record by ID from the context_vectors table.
 func (s *SQLiteStore) Delete(table string, id string) error {
+	if err := validateTable(table); err != nil {
+		return err
+	}
 	res, err := s.db.Exec("DELETE FROM context_vectors WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("deleting record %s: %w", id, err)
@@ -203,14 +220,17 @@ func (s *SQLiteStore) Delete(table string, id string) error {
 	return nil
 }
 
-// CreateTable is a no-op since tables are managed by SQLite migrations.
+// CreateTable validates the table name. Tables are managed by SQLite migrations.
 func (s *SQLiteStore) CreateTable(name string) error {
-	return nil
+	return validateTable(name)
 }
 
 // ExportAll returns all records from the context_vectors table.
 // Used for data migration to another VectorStore backend.
 func (s *SQLiteStore) ExportAll(table string) ([]Record, error) {
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(`
 		SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
 		FROM context_vectors ORDER BY created_at ASC`)
@@ -244,6 +264,9 @@ func (s *SQLiteStore) ExportAll(table string) ([]Record, error) {
 
 // Count returns the number of records in the context_vectors table.
 func (s *SQLiteStore) Count(table string) (int, error) {
+	if err := validateTable(table); err != nil {
+		return 0, err
+	}
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM context_vectors").Scan(&count)
 	return count, err
@@ -251,6 +274,9 @@ func (s *SQLiteStore) Count(table string) (int, error) {
 
 // GetByIDs returns records matching the given IDs from the context_vectors table.
 func (s *SQLiteStore) GetByIDs(ctx context.Context, table string, ids []string) ([]Record, error) {
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
 	if len(ids) == 0 {
 		return nil, nil
 	}

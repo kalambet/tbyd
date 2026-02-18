@@ -40,6 +40,7 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32,
 	}
 	results := make([][]float32, len(texts))
 	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(4) // Bound concurrency to avoid overwhelming Ollama.
 
 	for i, text := range texts {
 		i, text := i, text // Capture loop variables for the goroutine.

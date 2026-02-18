@@ -215,6 +215,37 @@ func TestVectorStoreInterface(t *testing.T) {
 	}
 }
 
+func TestInvalidTableName(t *testing.T) {
+	db := openTestDB(t)
+	s := NewSQLiteStore(db)
+
+	if err := s.CreateTable("wrong_table"); err == nil {
+		t.Error("expected error for invalid table name in CreateTable")
+	}
+	if err := s.Insert("wrong_table", nil); err == nil {
+		t.Error("expected error for invalid table name in Insert")
+	}
+	if _, err := s.Search("wrong_table", makeTestVector(768, 0.1), 5, ""); err == nil {
+		t.Error("expected error for invalid table name in Search")
+	}
+	if err := s.Delete("wrong_table", "id"); err == nil {
+		t.Error("expected error for invalid table name in Delete")
+	}
+}
+
+func TestSearch_TopKZero(t *testing.T) {
+	db := openTestDB(t)
+	s := NewSQLiteStore(db)
+
+	results, err := s.Search("context_vectors", makeTestVector(768, 0.1), 0, "")
+	if err != nil {
+		t.Fatalf("Search with topK=0: %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results for topK=0, got %d", len(results))
+	}
+}
+
 func TestTableCreation_Idempotent(t *testing.T) {
 	db := openTestDB(t)
 	s := NewSQLiteStore(db)
