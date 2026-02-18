@@ -49,7 +49,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("opening storage: %w", err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", err)
+		}
+	}()
 
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
