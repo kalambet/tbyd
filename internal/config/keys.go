@@ -69,6 +69,11 @@ var specs = []keySpec{
 		apply:   func(cfg *Config, v any) { cfg.Proxy.DefaultModel = v.(string) },
 		extract: func(cfg Config) any { return cfg.Proxy.DefaultModel },
 	},
+	{
+		key: "log.level", typ: kString, env: "TBYD_LOG_LEVEL",
+		apply:   func(cfg *Config, v any) { cfg.Log.Level = v.(string) },
+		extract: func(cfg Config) any { return cfg.Log.Level },
+	},
 }
 
 func applyBackend(cfg *Config, b ConfigBackend) error {

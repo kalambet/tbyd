@@ -198,6 +198,54 @@ func TestSecretNotReadFromBackend(t *testing.T) {
 	}
 }
 
+// TestDefaults_LogLevel verifies the default log level is "info".
+func TestDefaults_LogLevel(t *testing.T) {
+	b := newMockBackend()
+	kc := mockKeychain{value: "test-key"}
+
+	cfg, err := loadWith(b, kc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Log.Level != "info" {
+		t.Errorf("Log.Level = %q, want %q", cfg.Log.Level, "info")
+	}
+}
+
+// TestBackendOverride_LogLevel verifies backend can set log level.
+func TestBackendOverride_LogLevel(t *testing.T) {
+	b := newMockBackend()
+	b.strings["log.level"] = "debug"
+	kc := mockKeychain{value: "test-key"}
+
+	cfg, err := loadWith(b, kc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Log.Level != "debug" {
+		t.Errorf("Log.Level = %q, want %q", cfg.Log.Level, "debug")
+	}
+}
+
+// TestEnvOverride_LogLevel verifies TBYD_LOG_LEVEL overrides backend.
+func TestEnvOverride_LogLevel(t *testing.T) {
+	b := newMockBackend()
+	kc := mockKeychain{value: "test-key"}
+
+	t.Setenv("TBYD_LOG_LEVEL", "debug")
+
+	cfg, err := loadWith(b, kc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.Log.Level != "debug" {
+		t.Errorf("Log.Level = %q, want %q", cfg.Log.Level, "debug")
+	}
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
