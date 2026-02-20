@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     enriched_prompt TEXT,
     cloud_model TEXT,
     cloud_response TEXT,
+    status TEXT NOT NULL DEFAULT 'completed',
     feedback_score INTEGER DEFAULT 0,
     feedback_notes TEXT,
     vector_ids TEXT DEFAULT '[]'

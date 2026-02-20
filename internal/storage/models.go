@@ -15,6 +15,7 @@ type Interaction struct {
 	EnrichedPrompt string
 	CloudModel     string
 	CloudResponse  string
+	Status         string
 	FeedbackScore  int
 	FeedbackNotes  string
 	VectorIDs      string // JSON array stored as text

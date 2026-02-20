@@ -169,11 +169,15 @@ func (s *Store) AppliedMigrations() ([]int, error) {
 // --- Interactions ---
 
 func (s *Store) SaveInteraction(i Interaction) error {
+	status := i.Status
+	if status == "" {
+		status = "completed"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO interactions (id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, feedback_score, feedback_notes, vector_ids)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO interactions (id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.CreatedAt.UTC().Format(time.RFC3339), i.UserQuery, i.EnrichedPrompt,
-		i.CloudModel, i.CloudResponse, i.FeedbackScore, i.FeedbackNotes, i.VectorIDs,
+		i.CloudModel, i.CloudResponse, status, i.FeedbackScore, i.FeedbackNotes, i.VectorIDs,
 	)
 	return err
 }
@@ -182,9 +186,9 @@ func (s *Store) GetInteraction(id string) (Interaction, error) {
 	var i Interaction
 	var createdAt string
 	err := s.db.QueryRow(`
-		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, feedback_score, feedback_notes, vector_ids
+		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids
 		FROM interactions WHERE id = ?`, id,
-	).Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs)
+	).Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.Status, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs)
 	if err == sql.ErrNoRows {
 		return Interaction{}, ErrNotFound
 	}
@@ -216,7 +220,7 @@ func (s *Store) UpdateFeedback(id string, score int, notes string) error {
 
 func (s *Store) GetRecentInteractions(limit int) ([]Interaction, error) {
 	rows, err := s.db.Query(`
-		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, feedback_score, feedback_notes, vector_ids
+		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids
 		FROM interactions ORDER BY created_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -228,7 +232,7 @@ func (s *Store) GetRecentInteractions(limit int) ([]Interaction, error) {
 	for rows.Next() {
 		var i Interaction
 		var createdAt string
-		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
+		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.Status, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)

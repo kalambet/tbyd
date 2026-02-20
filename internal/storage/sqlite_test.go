@@ -200,6 +200,57 @@ func TestGetRecentInteractions(t *testing.T) {
 	}
 }
 
+// TestSaveAndGetInteraction_Status saves an interaction with explicit status and verifies it.
+func TestSaveAndGetInteraction_Status(t *testing.T) {
+	s := openTestStore(t)
+
+	want := Interaction{
+		ID:        "int-status-1",
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		UserQuery: "test query",
+		Status:    "aborted",
+		VectorIDs: "[]",
+	}
+
+	if err := s.SaveInteraction(want); err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	got, err := s.GetInteraction("int-status-1")
+	if err != nil {
+		t.Fatalf("GetInteraction: %v", err)
+	}
+
+	if got.Status != "aborted" {
+		t.Errorf("Status = %q, want %q", got.Status, "aborted")
+	}
+}
+
+// TestSaveInteraction_DefaultStatus saves an interaction without explicit status and verifies default.
+func TestSaveInteraction_DefaultStatus(t *testing.T) {
+	s := openTestStore(t)
+
+	want := Interaction{
+		ID:        "int-status-default",
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		UserQuery: "test query",
+		VectorIDs: "[]",
+	}
+
+	if err := s.SaveInteraction(want); err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	got, err := s.GetInteraction("int-status-default")
+	if err != nil {
+		t.Fatalf("GetInteraction: %v", err)
+	}
+
+	if got.Status != "completed" {
+		t.Errorf("Status = %q, want %q", got.Status, "completed")
+	}
+}
+
 // TestProfileKeyRoundTrip sets a key and gets it back.
 func TestProfileKeyRoundTrip(t *testing.T) {
 	s := openTestStore(t)

@@ -702,8 +702,8 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **0.6** OpenAI-compatible REST API server (passthrough mode)
 
 ### Phase 00 — Foundation Gaps
-- [ ] **00.1** Add `LogConfig` to config
-- [ ] **00.2** Add `status` column to `interactions` table
+- [x] **00.1** Add `LogConfig` to config
+- [x] **00.2** Add `status` column to `interactions` table
 - [ ] **00.3** Add indexes to `interactions` table
 - [ ] **00.4** Add `context_vectors` table to migration
 - [ ] **00.5** Add `jobs` table and model
