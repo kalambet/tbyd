@@ -10,6 +10,11 @@ type Config struct {
 	Ollama  OllamaConfig
 	Storage StorageConfig
 	Proxy   ProxyConfig
+	Log     LogConfig
+}
+
+type LogConfig struct {
+	Level string // default "info"
 }
 
 type ServerConfig struct {
@@ -51,6 +56,9 @@ func defaults() Config {
 		},
 		Proxy: ProxyConfig{
 			DefaultModel: "anthropic/claude-opus-4",
+		},
+		Log: LogConfig{
+			Level: "info",
 		},
 	}
 }

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +35,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	// Initialize structured logging.
+	logLevel := slog.LevelInfo
+	if strings.EqualFold(cfg.Log.Level, "debug") {
+		logLevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
