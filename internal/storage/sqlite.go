@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -341,4 +342,124 @@ func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 		results = append(results, d)
 	}
 	return results, rows.Err()
+}
+
+// --- Jobs ---
+
+func (s *Store) EnqueueJob(job Job) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	runAfter := now
+	if !job.RunAfter.IsZero() {
+		runAfter = job.RunAfter.UTC().Format(time.RFC3339)
+	}
+	maxAttempts := job.MaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = 3
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO jobs (id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at)
+		VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)`,
+		job.ID, job.Type, job.PayloadJSON, maxAttempts, runAfter, now, now,
+	)
+	return err
+}
+
+func (s *Store) ClaimNextJob(types []string) (*Job, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := strings.Repeat(",?", len(types)-1)
+	query := `SELECT id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at, last_error
+		FROM jobs
+		WHERE status = 'pending' AND run_after <= ? AND type IN (?` + placeholders + `)
+		ORDER BY run_after ASC, created_at ASC
+		LIMIT 1`
+
+	args := make([]interface{}, 0, len(types)+1)
+	args = append(args, now)
+	for _, t := range types {
+		args = append(args, t)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning claim transaction: %w", err)
+	}
+
+	var j Job
+	var runAfter, createdAt, updatedAt string
+	var lastError sql.NullString
+	err = tx.QueryRow(query, args...).Scan(
+		&j.ID, &j.Type, &j.PayloadJSON, &j.Status, &j.Attempts, &j.MaxAttempts,
+		&runAfter, &createdAt, &updatedAt, &lastError,
+	)
+	if err == sql.ErrNoRows {
+		tx.Rollback()
+		return nil, nil
+	}
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("selecting next job: %w", err)
+	}
+
+	_, err = tx.Exec(`UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?`, now, j.ID)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("updating job status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing claim: %w", err)
+	}
+
+	j.Status = "running"
+	j.RunAfter, _ = time.Parse(time.RFC3339, runAfter)
+	j.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	j.UpdatedAt, _ = time.Parse(time.RFC3339, now)
+	j.LastError = lastError.String
+	return &j, nil
+}
+
+func (s *Store) CompleteJob(id string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.Exec(`UPDATE jobs SET status = 'completed', updated_at = ? WHERE id = ?`, now, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) FailJob(id string, errMsg string) error {
+	now := time.Now().UTC()
+
+	var attempts, maxAttempts int
+	err := s.db.QueryRow(`SELECT attempts, max_attempts FROM jobs WHERE id = ?`, id).Scan(&attempts, &maxAttempts)
+	if err == sql.ErrNoRows {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	attempts++
+	if attempts >= maxAttempts {
+		_, err = s.db.Exec(`UPDATE jobs SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+			attempts, errMsg, now.Format(time.RFC3339), id)
+		return err
+	}
+
+	backoff := time.Duration(math.Pow(2, float64(attempts))) * time.Second
+	runAfter := now.Add(backoff)
+	_, err = s.db.Exec(`UPDATE jobs SET status = 'pending', attempts = ?, last_error = ?, run_after = ?, updated_at = ? WHERE id = ?`,
+		attempts, errMsg, runAfter.Format(time.RFC3339), now.Format(time.RFC3339), id)
+	return err
 }

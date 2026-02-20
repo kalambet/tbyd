@@ -420,3 +420,222 @@ func TestJobsTableExists(t *testing.T) {
 		t.Errorf("max_attempts = %d, want 3", maxAttempts)
 	}
 }
+
+func TestEnqueueAndClaimJob(t *testing.T) {
+	s := openTestStore(t)
+
+	job := Job{
+		ID:          "j-claim-1",
+		Type:        "enrichment",
+		PayloadJSON: `{"doc":"d1"}`,
+	}
+	if err := s.EnqueueJob(job); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	got, err := s.ClaimNextJob([]string{"enrichment"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ClaimNextJob returned nil")
+	}
+	if got.ID != "j-claim-1" {
+		t.Errorf("ID = %q, want %q", got.ID, "j-claim-1")
+	}
+	if got.Type != "enrichment" {
+		t.Errorf("Type = %q, want %q", got.Type, "enrichment")
+	}
+	if got.PayloadJSON != `{"doc":"d1"}` {
+		t.Errorf("PayloadJSON = %q, want %q", got.PayloadJSON, `{"doc":"d1"}`)
+	}
+	if got.Status != "running" {
+		t.Errorf("Status = %q, want %q", got.Status, "running")
+	}
+	if got.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts = %d, want 3", got.MaxAttempts)
+	}
+}
+
+func TestClaimNextJob_Empty(t *testing.T) {
+	s := openTestStore(t)
+
+	got, err := s.ClaimNextJob([]string{"enrichment"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+func TestClaimNextJob_RespectRunAfter(t *testing.T) {
+	s := openTestStore(t)
+
+	job := Job{
+		ID:          "j-future",
+		Type:        "enrichment",
+		PayloadJSON: `{}`,
+		RunAfter:    time.Now().UTC().Add(1 * time.Hour),
+	}
+	if err := s.EnqueueJob(job); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	got, err := s.ClaimNextJob([]string{"enrichment"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for future run_after, got %+v", got)
+	}
+}
+
+func TestClaimNextJob_TypeFilter(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-a", Type: "a", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob a: %v", err)
+	}
+	if err := s.EnqueueJob(Job{ID: "j-b", Type: "b", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob b: %v", err)
+	}
+
+	got, err := s.ClaimNextJob([]string{"a"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ClaimNextJob returned nil")
+	}
+	if got.Type != "a" {
+		t.Errorf("Type = %q, want %q", got.Type, "a")
+	}
+}
+
+func TestClaimNextJob_SkipsRunning(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-first", Type: "x", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob first: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
+		t.Fatalf("ClaimNextJob first: %v", err)
+	}
+
+	if err := s.EnqueueJob(Job{ID: "j-second", Type: "x", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob second: %v", err)
+	}
+
+	got, err := s.ClaimNextJob([]string{"x"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob second: %v", err)
+	}
+	if got == nil {
+		t.Fatal("ClaimNextJob returned nil")
+	}
+	if got.ID != "j-second" {
+		t.Errorf("ID = %q, want %q", got.ID, "j-second")
+	}
+}
+
+func TestCompleteJob(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-complete", Type: "x", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if err := s.CompleteJob("j-complete"); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM jobs WHERE id = 'j-complete'`).Scan(&status); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if status != "completed" {
+		t.Errorf("status = %q, want %q", status, "completed")
+	}
+}
+
+func TestFailJob_IncrementsAttempts(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-fail-inc", Type: "x", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if err := s.FailJob("j-fail-inc", "something broke"); err != nil {
+		t.Fatalf("FailJob: %v", err)
+	}
+
+	var status, lastError string
+	var attempts int
+	if err := s.db.QueryRow(`SELECT status, attempts, last_error FROM jobs WHERE id = 'j-fail-inc'`).Scan(&status, &attempts, &lastError); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want %q", status, "pending")
+	}
+	if lastError != "something broke" {
+		t.Errorf("last_error = %q, want %q", lastError, "something broke")
+	}
+}
+
+func TestFailJob_MaxAttemptsReached(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-fail-max", Type: "x", PayloadJSON: `{}`, MaxAttempts: 1}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if err := s.FailJob("j-fail-max", "fatal"); err != nil {
+		t.Fatalf("FailJob: %v", err)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM jobs WHERE id = 'j-fail-max'`).Scan(&status); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status = %q, want %q", status, "failed")
+	}
+}
+
+func TestFailJob_SetsBackoff(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(Job{ID: "j-backoff", Type: "x", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+
+	before := time.Now().UTC()
+	if err := s.FailJob("j-backoff", "retry"); err != nil {
+		t.Fatalf("FailJob: %v", err)
+	}
+
+	var runAfterStr string
+	if err := s.db.QueryRow(`SELECT run_after FROM jobs WHERE id = 'j-backoff'`).Scan(&runAfterStr); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	runAfter, err := time.Parse(time.RFC3339, runAfterStr)
+	if err != nil {
+		t.Fatalf("parsing run_after: %v", err)
+	}
+	if !runAfter.After(before) {
+		t.Errorf("run_after %v should be after %v", runAfter, before)
+	}
+}
