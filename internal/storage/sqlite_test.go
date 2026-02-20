@@ -69,6 +69,23 @@ func TestMigrationsOrdered(t *testing.T) {
 	}
 }
 
+// TestIndexesExist verifies that indexes on interactions table are created by the migration.
+func TestIndexesExist(t *testing.T) {
+	s := openTestStore(t)
+
+	indexes := []string{"idx_interactions_feedback", "idx_interactions_created"}
+	for _, idx := range indexes {
+		var count int
+		err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&count)
+		if err != nil {
+			t.Fatalf("querying sqlite_master for %q: %v", idx, err)
+		}
+		if count != 1 {
+			t.Errorf("index %q not found in sqlite_master", idx)
+		}
+	}
+}
+
 // TestSaveAndGetInteraction saves an interaction and retrieves it by ID.
 func TestSaveAndGetInteraction(t *testing.T) {
 	s := openTestStore(t)

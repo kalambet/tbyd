@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS interactions (
     vector_ids TEXT DEFAULT '[]'
 );
 
+CREATE INDEX IF NOT EXISTS idx_interactions_feedback ON interactions(feedback_score);
+CREATE INDEX IF NOT EXISTS idx_interactions_created ON interactions(created_at);
+
 CREATE TABLE IF NOT EXISTS user_profile (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
