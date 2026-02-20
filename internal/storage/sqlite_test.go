@@ -86,6 +86,27 @@ func TestIndexesExist(t *testing.T) {
 	}
 }
 
+// TestContextVectorsTableExists verifies that the context_vectors table is created by migration and supports round-trip.
+func TestContextVectorsTableExists(t *testing.T) {
+	s := openTestStore(t)
+
+	_, err := s.db.Exec(`INSERT INTO context_vectors (id, source_id, source_type, text_chunk, embedding, created_at, tags)
+		VALUES ('v1', 'src1', 'doc', 'hello world', X'00000000', '2025-01-01T00:00:00Z', '[]')`)
+	if err != nil {
+		t.Fatalf("INSERT into context_vectors: %v", err)
+	}
+
+	var id, sourceID, sourceType, textChunk, tags string
+	err = s.db.QueryRow(`SELECT id, source_id, source_type, text_chunk, tags FROM context_vectors WHERE id = 'v1'`).
+		Scan(&id, &sourceID, &sourceType, &textChunk, &tags)
+	if err != nil {
+		t.Fatalf("SELECT from context_vectors: %v", err)
+	}
+	if id != "v1" || sourceID != "src1" || sourceType != "doc" || textChunk != "hello world" {
+		t.Errorf("round-trip mismatch: got id=%q source_id=%q source_type=%q text_chunk=%q", id, sourceID, sourceType, textChunk)
+	}
+}
+
 // TestSaveAndGetInteraction saves an interaction and retrieves it by ID.
 func TestSaveAndGetInteraction(t *testing.T) {
 	s := openTestStore(t)

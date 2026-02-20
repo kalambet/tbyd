@@ -705,7 +705,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **00.1** Add `LogConfig` to config
 - [x] **00.2** Add `status` column to `interactions` table
 - [x] **00.3** Add indexes to `interactions` table
-- [ ] **00.4** Add `context_vectors` table to migration
+- [x] **00.4** Add `context_vectors` table to migration
 - [ ] **00.5** Add `jobs` table and model
 - [ ] **00.6** Add job queue methods to Store
 - [ ] **00.7** API token generation and platform secret store
