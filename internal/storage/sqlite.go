@@ -404,10 +404,19 @@ func (s *Store) ClaimNextJob(types []string) (*Job, error) {
 		return nil, fmt.Errorf("selecting next job: %w", err)
 	}
 
-	_, err = tx.Exec(`UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?`, now, j.ID)
+	res, err := tx.Exec(`UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'`, now, j.ID)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("updating job status: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("checking updated job rows: %w", err)
+	}
+	if n != 1 {
+		tx.Rollback()
+		return nil, nil
 	}
 
 	if err := tx.Commit(); err != nil {

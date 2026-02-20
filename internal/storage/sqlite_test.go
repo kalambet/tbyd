@@ -73,7 +73,7 @@ func TestMigrationsOrdered(t *testing.T) {
 func TestIndexesExist(t *testing.T) {
 	s := openTestStore(t)
 
-	indexes := []string{"idx_interactions_feedback", "idx_interactions_created"}
+	indexes := []string{"idx_interactions_feedback", "idx_interactions_created", "idx_jobs_status_run_after", "idx_context_vectors_source_id", "idx_context_vectors_source_type"}
 	for _, idx := range indexes {
 		var count int
 		err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&count)
