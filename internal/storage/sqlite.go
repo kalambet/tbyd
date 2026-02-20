@@ -415,10 +415,16 @@ func (s *Store) ClaimNextJob(types []string) (*Job, error) {
 	}
 
 	j.Status = "running"
-	j.RunAfter, _ = time.Parse(time.RFC3339, runAfter)
-	j.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	j.UpdatedAt, _ = time.Parse(time.RFC3339, now)
 	j.LastError = lastError.String
+	if j.RunAfter, err = time.Parse(time.RFC3339, runAfter); err != nil {
+		return nil, fmt.Errorf("parsing run_after for job %s: %w", j.ID, err)
+	}
+	if j.CreatedAt, err = time.Parse(time.RFC3339, createdAt); err != nil {
+		return nil, fmt.Errorf("parsing created_at for job %s: %w", j.ID, err)
+	}
+	if j.UpdatedAt, err = time.Parse(time.RFC3339, now); err != nil {
+		return nil, fmt.Errorf("parsing updated_at for job %s: %w", j.ID, err)
+	}
 	return &j, nil
 }
 
@@ -439,10 +445,14 @@ func (s *Store) CompleteJob(id string) error {
 }
 
 func (s *Store) FailJob(id string, errMsg string) error {
-	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning fail transaction: %w", err)
+	}
+	defer tx.Rollback()
 
 	var attempts, maxAttempts int
-	err := s.db.QueryRow(`SELECT attempts, max_attempts FROM jobs WHERE id = ?`, id).Scan(&attempts, &maxAttempts)
+	err = tx.QueryRow(`SELECT attempts, max_attempts FROM jobs WHERE id = ?`, id).Scan(&attempts, &maxAttempts)
 	if err == sql.ErrNoRows {
 		return ErrNotFound
 	}
@@ -450,16 +460,22 @@ func (s *Store) FailJob(id string, errMsg string) error {
 		return err
 	}
 
+	now := time.Now().UTC()
 	attempts++
+
 	if attempts >= maxAttempts {
-		_, err = s.db.Exec(`UPDATE jobs SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`,
+		_, err = tx.Exec(`UPDATE jobs SET status = 'failed', attempts = ?, last_error = ?, updated_at = ? WHERE id = ?`,
 			attempts, errMsg, now.Format(time.RFC3339), id)
+	} else {
+		backoff := time.Duration(math.Pow(2, float64(attempts))) * time.Second
+		runAfter := now.Add(backoff)
+		_, err = tx.Exec(`UPDATE jobs SET status = 'pending', attempts = ?, last_error = ?, run_after = ?, updated_at = ? WHERE id = ?`,
+			attempts, errMsg, runAfter.Format(time.RFC3339), now.Format(time.RFC3339), id)
+	}
+
+	if err != nil {
 		return err
 	}
 
-	backoff := time.Duration(math.Pow(2, float64(attempts))) * time.Second
-	runAfter := now.Add(backoff)
-	_, err = s.db.Exec(`UPDATE jobs SET status = 'pending', attempts = ?, last_error = ?, run_after = ?, updated_at = ? WHERE id = ?`,
-		attempts, errMsg, runAfter.Format(time.RFC3339), now.Format(time.RFC3339), id)
-	return err
+	return tx.Commit()
 }
