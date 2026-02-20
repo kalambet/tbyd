@@ -21,6 +21,19 @@ type Interaction struct {
 	VectorIDs      string // JSON array stored as text
 }
 
+type Job struct {
+	ID          string
+	Type        string
+	PayloadJSON string
+	Status      string // "pending", "running", "completed", "failed"
+	Attempts    int
+	MaxAttempts int
+	RunAfter    time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	LastError   string
+}
+
 type ContextDoc struct {
 	ID        string
 	Title     string

@@ -47,3 +47,18 @@ CREATE TABLE IF NOT EXISTS context_vectors (
 
 CREATE INDEX IF NOT EXISTS idx_context_vectors_source_id ON context_vectors(source_id);
 CREATE INDEX IF NOT EXISTS idx_context_vectors_source_type ON context_vectors(source_type);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    run_after DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status_run_after ON jobs(status, run_after);

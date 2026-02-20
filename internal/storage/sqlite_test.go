@@ -383,3 +383,40 @@ func TestSaveAndListContextDocs(t *testing.T) {
 		t.Errorf("first doc ID = %q, want %q", got[0].ID, "doc-02")
 	}
 }
+
+// TestJobsTableExists verifies the jobs table is created by migration and supports round-trip.
+func TestJobsTableExists(t *testing.T) {
+	s := openTestStore(t)
+
+	_, err := s.db.Exec(`INSERT INTO jobs (id, type, payload_json) VALUES ('j1', 'enrichment', '{"doc_id":"d1"}')`)
+	if err != nil {
+		t.Fatalf("INSERT into jobs: %v", err)
+	}
+
+	var id, typ, payload, status string
+	var attempts, maxAttempts int
+	err = s.db.QueryRow(`SELECT id, type, payload_json, status, attempts, max_attempts FROM jobs WHERE id = 'j1'`).
+		Scan(&id, &typ, &payload, &status, &attempts, &maxAttempts)
+	if err != nil {
+		t.Fatalf("SELECT from jobs: %v", err)
+	}
+
+	if id != "j1" {
+		t.Errorf("id = %q, want %q", id, "j1")
+	}
+	if typ != "enrichment" {
+		t.Errorf("type = %q, want %q", typ, "enrichment")
+	}
+	if payload != `{"doc_id":"d1"}` {
+		t.Errorf("payload_json = %q, want %q", payload, `{"doc_id":"d1"}`)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want %q", status, "pending")
+	}
+	if attempts != 0 {
+		t.Errorf("attempts = %d, want 0", attempts)
+	}
+	if maxAttempts != 3 {
+		t.Errorf("max_attempts = %d, want 3", maxAttempts)
+	}
+}
