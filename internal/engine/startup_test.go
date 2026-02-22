@@ -2,8 +2,8 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +70,7 @@ func TestEnsureReady_EngineDown(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when engine is down")
 	}
-	fmt.Println(err)
+	if !strings.Contains(err.Error(), "not running") {
+		t.Errorf("error = %q, want it to contain 'not running'", err)
+	}
 }
