@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -85,7 +86,7 @@ func (m *Manager) GetProfile() (Profile, error) {
 	p := buildProfile(keys)
 	m.cached = &p
 	m.cachedAt = m.clock.Now()
-	return p, nil
+	return deepCopyProfile(&p), nil
 }
 
 // SetField persists a profile key and invalidates the cache.
@@ -242,12 +243,7 @@ func buildProfile(keys map[string]string) Profile {
 	if v, ok := keys["identity.role"]; ok {
 		p.Identity.Role = v
 	}
-	if v, ok := keys["identity.working_context"]; ok {
-		var wc map[string]string
-		if json.Unmarshal([]byte(v), &wc) == nil {
-			p.Identity.WorkingContext = wc
-		}
-	}
+	unmarshalProfileKey(keys, "identity.working_context", &p.Identity.WorkingContext)
 
 	// Communication
 	if v, ok := keys["communication.tone"]; ok {
@@ -260,37 +256,23 @@ func buildProfile(keys map[string]string) Profile {
 		p.Communication.DetailLevel = v
 	}
 
-	// Interests
-	if v, ok := keys["interests"]; ok {
-		var list []string
-		if json.Unmarshal([]byte(v), &list) == nil {
-			p.Interests = list
-		}
-	}
-
-	// Expertise
-	if v, ok := keys["expertise"]; ok {
-		var m map[string]string
-		if json.Unmarshal([]byte(v), &m) == nil {
-			p.Expertise = m
-		}
-	}
-
-	// Opinions
-	if v, ok := keys["opinions"]; ok {
-		var list []string
-		if json.Unmarshal([]byte(v), &list) == nil {
-			p.Opinions = list
-		}
-	}
-
-	// Preferences
-	if v, ok := keys["preferences"]; ok {
-		var list []string
-		if json.Unmarshal([]byte(v), &list) == nil {
-			p.Preferences = list
-		}
-	}
+	// JSON fields
+	unmarshalProfileKey(keys, "interests", &p.Interests)
+	unmarshalProfileKey(keys, "expertise", &p.Expertise)
+	unmarshalProfileKey(keys, "opinions", &p.Opinions)
+	unmarshalProfileKey(keys, "preferences", &p.Preferences)
 
 	return p
+}
+
+// unmarshalProfileKey unmarshals a JSON value from keys into target, logging
+// a warning if the value is present but malformed.
+func unmarshalProfileKey(keys map[string]string, key string, target interface{}) {
+	v, ok := keys[key]
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal([]byte(v), target); err != nil {
+		slog.Warn("malformed profile key, skipping", "key", key, "error", err)
+	}
 }
