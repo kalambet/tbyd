@@ -3,6 +3,8 @@ package intent
 import (
 	"strings"
 	"testing"
+
+	"github.com/kalambet/tbyd/internal/ollama"
 )
 
 func TestPromptContainsInstructions(t *testing.T) {
@@ -33,7 +35,7 @@ func TestPromptInjectsProfile(t *testing.T) {
 }
 
 func TestPromptHistory(t *testing.T) {
-	history := []Message{
+	history := []ollama.Message{
 		{Role: "user", Content: "first message"},
 		{Role: "assistant", Content: "first reply"},
 		{Role: "user", Content: "second message"},

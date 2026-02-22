@@ -25,8 +25,8 @@ func TestExtract_RealOllama(t *testing.T) {
 	intent := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "")
 	elapsed := time.Since(start)
 
-	if elapsed > 3*time.Second {
-		t.Errorf("extraction took %v, want < 3s", elapsed)
+	if elapsed > extractionTimeout {
+		t.Errorf("extraction took %v, want < %v", elapsed, extractionTimeout)
 	}
 
 	if intent.IntentType == "" {

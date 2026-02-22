@@ -22,7 +22,7 @@ Rules:
 - Set is_private to true only if the query contains clearly sensitive personal information.`
 
 // BuildPrompt constructs the Ollama chat messages for intent extraction.
-func BuildPrompt(query string, history []Message, profileSummary string) []ollama.Message {
+func BuildPrompt(query string, history []ollama.Message, profileSummary string) []ollama.Message {
 	var sb strings.Builder
 	sb.WriteString(systemPromptTemplate)
 
@@ -34,12 +34,7 @@ func BuildPrompt(query string, history []Message, profileSummary string) []ollam
 		{Role: "system", Content: sb.String()},
 	}
 
-	for _, m := range history {
-		messages = append(messages, ollama.Message{
-			Role:    m.Role,
-			Content: m.Content,
-		})
-	}
+	messages = append(messages, history...)
 
 	messages = append(messages, ollama.Message{
 		Role:    "user",

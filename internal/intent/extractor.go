@@ -3,6 +3,7 @@ package intent
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/kalambet/tbyd/internal/ollama"
@@ -13,12 +14,6 @@ const extractionTimeout = 3 * time.Second
 // OllamaChatter is the interface for chat completion via Ollama.
 type OllamaChatter interface {
 	Chat(ctx context.Context, model string, messages []ollama.Message, jsonSchema *ollama.Schema) (string, error)
-}
-
-// Message represents a conversation message for history context.
-type Message struct {
-	Role    string
-	Content string
 }
 
 // Intent holds the structured extraction result from a user query.
@@ -44,7 +39,7 @@ func NewExtractor(client OllamaChatter, model string) *Extractor {
 // Extract analyses the query and recent history, returning a structured Intent.
 // On any failure (timeout, malformed JSON, Ollama error) it returns a zero-value
 // Intent — the enrichment pipeline must not block on extraction failures.
-func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []Message, profileSummary string) Intent {
+func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []ollama.Message, profileSummary string) Intent {
 	if query == "" {
 		return Intent{}
 	}
@@ -56,11 +51,13 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []M
 
 	raw, err := e.client.Chat(ctx, e.model, messages, intentSchema())
 	if err != nil {
+		slog.Warn("intent extraction chat failed", "error", err)
 		return Intent{}
 	}
 
 	var result Intent
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		slog.Warn("failed to unmarshal intent from LLM response", "error", err, "response", raw)
 		return Intent{}
 	}
 	return result
