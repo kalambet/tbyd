@@ -5,12 +5,10 @@ import (
 	"testing"
 )
 
-// mockKeychain is a test double for the keychain interface.
+// mockKeychain is a test double for the Keychain interface.
 type mockKeychain struct {
-	store map[string]string // key = "service/account"
-	value string            // legacy: returned by Get when store is nil
-	err   error
-
+	store     map[string]string // key = "service/account"
+	err       error
 	setCalled bool
 }
 
@@ -19,24 +17,19 @@ func newMockKeychain() *mockKeychain {
 }
 
 func (m *mockKeychain) Get(service, account string) (string, error) {
-	if m.store != nil {
-		v, ok := m.store[service+"/"+account]
-		if !ok {
-			if m.err != nil {
-				return "", m.err
-			}
-			return "", ErrNotFound
+	v, ok := m.store[service+"/"+account]
+	if !ok {
+		if m.err != nil {
+			return "", m.err
 		}
-		return v, nil
+		return "", ErrNotFound
 	}
-	return m.value, m.err
+	return v, nil
 }
 
 func (m *mockKeychain) Set(service, account, value string) error {
 	m.setCalled = true
-	if m.store != nil {
-		m.store[service+"/"+account] = value
-	}
+	m.store[service+"/"+account] = value
 	return nil
 }
 
@@ -82,7 +75,8 @@ func (m *mockBackend) Delete(key string) error {
 // TestDefaults verifies all default values are applied when the backend is empty.
 func TestDefaults(t *testing.T) {
 	b := newMockBackend()
-	kc := &mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -124,7 +118,8 @@ func TestBackendOverride(t *testing.T) {
 	b.strings["storage.data_dir"] = "/tmp/tbyd-test"
 	b.strings["proxy.default_model"] = "openai/gpt-4o"
 
-	kc := &mockKeychain{value: "backend-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "backend-key"
 	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -164,7 +159,7 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "env-key")
 	t.Setenv("TBYD_SERVER_PORT", "6000")
 
-	cfg, err := loadWith(b, &mockKeychain{})
+	cfg, err := loadWith(b, newMockKeychain())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,7 +178,7 @@ func TestMissingRequiredField(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	_, err := loadWith(b, &mockKeychain{})
+	_, err := loadWith(b, newMockKeychain())
 	if err == nil {
 		t.Fatal("expected error for missing API key, got nil")
 	}
@@ -200,7 +195,8 @@ func TestKeychainFallback(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	kc := &mockKeychain{value: "keychain-secret"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "keychain-secret"
 	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -218,7 +214,7 @@ func TestSecretNotReadFromBackend(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	_, err := loadWith(b, &mockKeychain{})
+	_, err := loadWith(b, newMockKeychain())
 	if err == nil {
 		t.Fatal("expected error: secret should not be read from backend, so API key should be missing")
 	}
@@ -227,7 +223,8 @@ func TestSecretNotReadFromBackend(t *testing.T) {
 // TestDefaults_LogLevel verifies the default log level is "info".
 func TestDefaults_LogLevel(t *testing.T) {
 	b := newMockBackend()
-	kc := &mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -243,7 +240,8 @@ func TestDefaults_LogLevel(t *testing.T) {
 func TestBackendOverride_LogLevel(t *testing.T) {
 	b := newMockBackend()
 	b.strings["log.level"] = "debug"
-	kc := &mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -258,7 +256,8 @@ func TestBackendOverride_LogLevel(t *testing.T) {
 // TestEnvOverride_LogLevel verifies TBYD_LOG_LEVEL overrides backend.
 func TestEnvOverride_LogLevel(t *testing.T) {
 	b := newMockBackend()
-	kc := &mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	t.Setenv("TBYD_LOG_LEVEL", "debug")
 
