@@ -43,6 +43,12 @@ func run() error {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
+	// Ensure API token exists in platform secret store.
+	if _, err := config.GetAPIToken(config.NewKeychain()); err != nil {
+		return fmt.Errorf("initializing API token: %w", err)
+	}
+	slog.Info("API bearer token available")
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

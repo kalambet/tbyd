@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -73,12 +75,21 @@ func defaults() Config {
 //
 // Environment variables (TBYD_*) override backend values on all platforms.
 func Load() (Config, error) {
-	return loadWith(newPlatformBackend(), keychainReader{})
+	return loadWith(newPlatformBackend(), keychainClient{})
 }
+
+// NewKeychain returns the platform keychain client for use outside config loading.
+func NewKeychain() keychain {
+	return keychainClient{}
+}
+
+// Keychain re-exports the keychain interface for use by callers of GetAPIToken.
+type Keychain = keychain
 
 // keychain abstracts Keychain access for testing.
 type keychain interface {
 	Get(service, account string) (string, error)
+	Set(service, account, value string) error
 }
 
 func loadWith(b ConfigBackend, kc keychain) (Config, error) {
@@ -107,13 +118,42 @@ func loadWith(b ConfigBackend, kc keychain) (Config, error) {
 	return cfg, nil
 }
 
-// keychainReader reads from macOS Keychain via the security CLI.
-type keychainReader struct{}
+// keychainClient reads from and writes to the platform secret store.
+type keychainClient struct{}
 
-func (keychainReader) Get(service, account string) (string, error) {
-	out, err := keychainExec(service, account)
+func (keychainClient) Get(service, account string) (string, error) {
+	out, err := keychainGet(service, account)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (keychainClient) Set(service, account, value string) error {
+	return keychainSet(service, account, value)
+}
+
+const (
+	apiTokenService = "tbyd"
+	apiTokenAccount = "tbyd-api-token"
+)
+
+// GetAPIToken reads the API bearer token from the secret store. If none
+// exists, a random 256-bit hex-encoded token is generated and stored.
+func GetAPIToken(kc keychain) (string, error) {
+	tok, err := kc.Get(apiTokenService, apiTokenAccount)
+	if err == nil && tok != "" {
+		return tok, nil
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating API token: %w", err)
+	}
+	tok = hex.EncodeToString(b)
+
+	if err := kc.Set(apiTokenService, apiTokenAccount, tok); err != nil {
+		return "", fmt.Errorf("storing API token: %w", err)
+	}
+	return tok, nil
 }
