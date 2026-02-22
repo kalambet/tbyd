@@ -41,7 +41,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, topK int) ([]Con
 		return nil, err
 	}
 
-	scored, err := r.store.Search("context_vectors", vec, topK, "")
+	scored, err := r.store.Search(expectedTable, vec, topK, "")
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (r *Retriever) RetrieveByIDs(ctx context.Context, ids []string) ([]ContextC
 		return nil, nil
 	}
 
-	records, err := r.store.GetByIDs(ctx, "context_vectors", ids)
+	records, err := r.store.GetByIDs(ctx, expectedTable, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 				return nil
 			}
 
-			results, err := r.store.Search("context_vectors", vec, perSearchK, filter)
+			results, err := r.store.Search(expectedTable, vec, perSearchK, filter)
 			if err != nil {
 				slog.Warn("retrieval search failed, skipping", "text", text, "error", err)
 				return nil
@@ -121,7 +121,9 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		})
 	}
 
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		slog.Warn("retrieval group wait returned an error", "error", err)
+	}
 
 	if len(allScored) == 0 {
 		return nil
