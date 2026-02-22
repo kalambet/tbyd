@@ -3,6 +3,7 @@ package intent
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -32,13 +33,17 @@ func TestExtract_RecallIntent(t *testing.T) {
 		response: `{"intent_type":"recall","entities":["database schema"],"topics":["architecture","decisions"],"context_needs":["past_decisions"],"is_private":false}`,
 	}
 	e := NewExtractor(mock, "phi3.5")
-	intent := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "")
+	got := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "")
 
-	if intent.IntentType != "recall" {
-		t.Errorf("IntentType = %q, want %q", intent.IntentType, "recall")
+	want := Intent{
+		IntentType:   "recall",
+		Entities:     []string{"database schema"},
+		Topics:       []string{"architecture", "decisions"},
+		ContextNeeds: []string{"past_decisions"},
+		IsPrivate:    false,
 	}
-	if len(intent.Entities) == 0 || intent.Entities[0] != "database schema" {
-		t.Errorf("Entities = %v, want [database schema]", intent.Entities)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Extract() = %+v, want %+v", got, want)
 	}
 }
 
@@ -47,13 +52,17 @@ func TestExtract_TaskIntent(t *testing.T) {
 		response: `{"intent_type":"task","entities":["CI pipeline"],"topics":["devops","automation"],"context_needs":["project_config"],"is_private":false}`,
 	}
 	e := NewExtractor(mock, "phi3.5")
-	intent := e.Extract(context.Background(), "set up CI for the project", nil, "")
+	got := e.Extract(context.Background(), "set up CI for the project", nil, "")
 
-	if intent.IntentType != "task" {
-		t.Errorf("IntentType = %q, want %q", intent.IntentType, "task")
+	want := Intent{
+		IntentType:   "task",
+		Entities:     []string{"CI pipeline"},
+		Topics:       []string{"devops", "automation"},
+		ContextNeeds: []string{"project_config"},
+		IsPrivate:    false,
 	}
-	if len(intent.Topics) != 2 {
-		t.Errorf("Topics = %v, want 2 topics", intent.Topics)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Extract() = %+v, want %+v", got, want)
 	}
 }
 

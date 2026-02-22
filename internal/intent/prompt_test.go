@@ -5,18 +5,18 @@ import (
 	"testing"
 )
 
-func TestPromptContainsSchema(t *testing.T) {
+func TestPromptContainsInstructions(t *testing.T) {
 	messages := BuildPrompt("test query", nil, "")
 
 	system := messages[0].Content
-	if !strings.Contains(system, "intent_type") {
-		t.Error("system prompt does not contain intent_type schema field")
+	if !strings.Contains(system, "intent extraction engine") {
+		t.Error("system prompt does not contain role instruction")
 	}
-	if !strings.Contains(system, "entities") {
-		t.Error("system prompt does not contain entities schema field")
+	if !strings.Contains(system, "recall") {
+		t.Error("system prompt does not contain intent type definitions")
 	}
-	if !strings.Contains(system, "context_needs") {
-		t.Error("system prompt does not contain context_needs schema field")
+	if !strings.Contains(system, "is_private") {
+		t.Error("system prompt does not contain privacy rule")
 	}
 }
 

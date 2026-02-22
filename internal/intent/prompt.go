@@ -7,15 +7,7 @@ import (
 	"github.com/kalambet/tbyd/internal/ollama"
 )
 
-const systemPromptTemplate = `You are an intent extraction engine. Analyze the user's query and return ONLY valid JSON matching this schema:
-
-{
-  "intent_type": "recall | task | question | preference_update",
-  "entities": ["named entities mentioned"],
-  "topics": ["semantic topic tags"],
-  "context_needs": ["what kind of context would help"],
-  "is_private": false
-}
+const systemPromptTemplate = `You are an intent extraction engine. Analyze the user's query and conversation history. Your output must be ONLY a single valid JSON object that conforms to the provided schema. Do not include any other text, prose, or markdown.
 
 Intent types:
 - "recall": user wants to remember or retrieve something from the past
@@ -24,7 +16,6 @@ Intent types:
 - "preference_update": user is expressing or updating a preference
 
 Rules:
-- Return ONLY the JSON object, no prose, no markdown, no explanation.
 - Extract all named entities (people, projects, technologies, concepts).
 - Infer relevant topic tags for semantic search.
 - Determine what stored context would help answer the query.
