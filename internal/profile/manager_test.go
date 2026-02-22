@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -115,16 +116,24 @@ func TestGetSummary_Full(t *testing.T) {
 	store := newMockStore()
 	mgr := NewManager(store)
 
-	mgr.SetField("identity.role", "software engineer")
-	mgr.SetField("communication.tone", "direct")
-	mgr.SetField("interests", []string{"privacy tech", "AI infra", "distributed systems"})
-	mgr.SetField("expertise", map[string]string{"go": "expert", "distributed_systems": "expert"})
+	if err := mgr.SetField("identity.role", "software engineer"); err != nil {
+		t.Fatalf("SetField(identity.role) error: %v", err)
+	}
+	if err := mgr.SetField("communication.tone", "direct"); err != nil {
+		t.Fatalf("SetField(communication.tone) error: %v", err)
+	}
+	if err := mgr.SetField("interests", []string{"privacy tech", "AI infra", "distributed systems"}); err != nil {
+		t.Fatalf("SetField(interests) error: %v", err)
+	}
+	if err := mgr.SetField("expertise", map[string]string{"go": "expert", "distributed_systems": "expert"}); err != nil {
+		t.Fatalf("SetField(expertise) error: %v", err)
+	}
 
 	summary := mgr.GetSummary()
 
 	checks := []string{"software engineer", "direct", "privacy tech"}
 	for _, want := range checks {
-		if !contains(summary, want) {
+		if !strings.Contains(summary, want) {
 			t.Errorf("summary missing %q: %s", want, summary)
 		}
 	}
@@ -138,7 +147,9 @@ func TestGetSummary_TokenBudget(t *testing.T) {
 	for i := range prefs {
 		prefs[i] = "Always do something very specific and detailed for testing the token budget constraint"
 	}
-	mgr.SetField("preferences", prefs)
+	if err := mgr.SetField("preferences", prefs); err != nil {
+		t.Fatalf("SetField(preferences) error: %v", err)
+	}
 
 	summary := mgr.GetSummary()
 	tokens := len(summary) / 4
@@ -149,10 +160,10 @@ func TestGetSummary_TokenBudget(t *testing.T) {
 
 func TestCacheTTL(t *testing.T) {
 	store := newMockStore()
+	store.SetProfileKey("identity.role", "engineer")
+
 	clock := &mockClock{now: time.Now()}
 	mgr := NewManagerWithClock(store, clock, 60*time.Second)
-
-	mgr.SetField("identity.role", "engineer")
 
 	mgr.GetProfile()
 	mgr.GetProfile()
@@ -172,7 +183,9 @@ func TestCacheInvalidation(t *testing.T) {
 	ttl := 60 * time.Second
 	mgr := NewManagerWithClock(store, clock, ttl)
 
-	mgr.SetField("identity.role", "engineer")
+	if err := mgr.SetField("identity.role", "engineer"); err != nil {
+		t.Fatalf("SetField error: %v", err)
+	}
 
 	mgr.GetProfile()
 
@@ -188,17 +201,4 @@ func TestCacheInvalidation(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("expected 2 store calls (cache expired), got %d", calls)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && stringContains(s, substr)
-}
-
-func stringContains(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

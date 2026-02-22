@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -89,13 +90,14 @@ func (m *Manager) SetField(key string, value interface{}) error {
 		str = string(b)
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if err := m.store.SetProfileKey(key, str); err != nil {
 		return fmt.Errorf("setting profile key %q: %w", key, err)
 	}
 
-	m.mu.Lock()
 	m.cached = nil
-	m.mu.Unlock()
 	return nil
 }
 
@@ -117,11 +119,16 @@ func summarize(p Profile) string {
 		parts = append(parts, fmt.Sprintf("User: %s.", p.Identity.Role))
 	}
 
-	// Expertise
+	// Expertise (sorted for deterministic output)
 	if len(p.Expertise) > 0 {
+		domains := make([]string, 0, len(p.Expertise))
+		for domain := range p.Expertise {
+			domains = append(domains, domain)
+		}
+		sort.Strings(domains)
 		var exps []string
-		for domain, level := range p.Expertise {
-			exps = append(exps, fmt.Sprintf("%s (%s)", domain, level))
+		for _, domain := range domains {
+			exps = append(exps, fmt.Sprintf("%s (%s)", domain, p.Expertise[domain]))
 		}
 		parts = append(parts, fmt.Sprintf("Expert in: %s.", strings.Join(exps, ", ")))
 	}
@@ -161,8 +168,12 @@ func summarize(p Profile) string {
 	}
 
 	summary := strings.Join(parts, " ")
-	if len(summary) >= maxSummaryChars {
-		summary = summary[:maxSummaryChars-1]
+	if len(summary) > maxSummaryChars {
+		if idx := strings.LastIndex(summary[:maxSummaryChars], " "); idx > 0 {
+			summary = summary[:idx]
+		} else {
+			summary = summary[:maxSummaryChars]
+		}
 	}
 	return summary
 }
