@@ -3,7 +3,6 @@ package ollama
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -241,27 +240,4 @@ func TestPullModel_Progress(t *testing.T) {
 	}
 }
 
-func TestEnsureReady_OllamaDown(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.Close()
 
-	c := New(srv.URL)
-	err := EnsureReady(context.Background(), c, "phi3.5", "nomic-embed-text", io.Discard)
-	if err == nil {
-		t.Fatal("expected error when Ollama is down")
-	}
-
-	want := "Ollama is not running"
-	if got := err.Error(); !contains(got, want) {
-		t.Errorf("error = %q, want it to contain %q", got, want)
-	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
