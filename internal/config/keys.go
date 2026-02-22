@@ -74,6 +74,11 @@ var specs = []keySpec{
 		apply:   func(cfg *Config, v any) { cfg.Log.Level = v.(string) },
 		extract: func(cfg Config) any { return cfg.Log.Level },
 	},
+	{
+		key: "retrieval.top_k", typ: kInt, env: "TBYD_RETRIEVAL_TOP_K",
+		apply:   func(cfg *Config, v any) { cfg.Retrieval.TopK = v.(int) },
+		extract: func(cfg Config) any { return cfg.Retrieval.TopK },
+	},
 }
 
 func applyBackend(cfg *Config, b ConfigBackend) error {
