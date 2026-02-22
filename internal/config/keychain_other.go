@@ -9,22 +9,29 @@ import (
 	"path/filepath"
 )
 
-func secretsFilePath() string {
+func secretsFilePath() (string, error) {
 	dir := os.Getenv("XDG_DATA_HOME")
 	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".local", "share")
-		} else {
-			dir = "."
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine secrets path: %w", err)
 		}
+		dir = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(dir, "tbyd", "secrets.json")
+	return filepath.Join(dir, "tbyd", "secrets.json"), nil
 }
 
 func keychainGet(service, account string) ([]byte, error) {
-	data, err := os.ReadFile(secretsFilePath())
+	p, err := secretsFilePath()
 	if err != nil {
-		return nil, fmt.Errorf("keychain not available: %w", err)
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("reading secrets file: %w", err)
 	}
 	var secrets map[string]map[string]string
 	if err := json.Unmarshal(data, &secrets); err != nil {
@@ -32,23 +39,31 @@ func keychainGet(service, account string) ([]byte, error) {
 	}
 	svc, ok := secrets[service]
 	if !ok {
-		return nil, fmt.Errorf("service %q not found", service)
+		return nil, ErrNotFound
 	}
 	val, ok := svc[account]
 	if !ok {
-		return nil, fmt.Errorf("account %q not found in service %q", account, service)
+		return nil, ErrNotFound
 	}
 	return []byte(val), nil
 }
 
 func keychainSet(service, account, value string) error {
-	p := secretsFilePath()
+	p, err := secretsFilePath()
+	if err != nil {
+		return err
+	}
 
 	var secrets map[string]map[string]string
 
 	data, err := os.ReadFile(p)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading secrets file: %w", err)
+	}
 	if err == nil {
-		_ = json.Unmarshal(data, &secrets)
+		if err := json.Unmarshal(data, &secrets); err != nil {
+			return fmt.Errorf("parsing secrets file: %w", err)
+		}
 	}
 	if secrets == nil {
 		secrets = make(map[string]map[string]string)
@@ -66,5 +81,11 @@ func keychainSet(service, account, value string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, out, 0o600)
+
+	// Atomic write: write to temp file then rename into place.
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("writing secrets temp file: %w", err)
+	}
+	return os.Rename(tmp, p)
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -65,13 +66,22 @@ func defaults() Config {
 	}
 }
 
+// Keychain abstracts platform secret store access.
+type Keychain interface {
+	Get(service, account string) (string, error)
+	Set(service, account, value string) error
+}
+
+// ErrNotFound is returned by Keychain.Get when the requested secret does not exist.
+var ErrNotFound = errors.New("secret not found")
+
 // Load reads configuration from the platform-native backend, environment
 // variables, and platform secret store.
 //
 // On macOS the backend is UserDefaults (domain: com.tbyd.app) and secrets
 // fall back to macOS Keychain.
 // On Linux the backend is a JSON file at $XDG_CONFIG_HOME/tbyd/config.json
-// and secrets must be provided via environment variables.
+// and secrets fall back to $XDG_DATA_HOME/tbyd/secrets.json.
 //
 // Environment variables (TBYD_*) override backend values on all platforms.
 func Load() (Config, error) {
@@ -79,20 +89,11 @@ func Load() (Config, error) {
 }
 
 // NewKeychain returns the platform keychain client for use outside config loading.
-func NewKeychain() keychain {
+func NewKeychain() Keychain {
 	return keychainClient{}
 }
 
-// Keychain re-exports the keychain interface for use by callers of GetAPIToken.
-type Keychain = keychain
-
-// keychain abstracts Keychain access for testing.
-type keychain interface {
-	Get(service, account string) (string, error)
-	Set(service, account, value string) error
-}
-
-func loadWith(b ConfigBackend, kc keychain) (Config, error) {
+func loadWith(b ConfigBackend, kc Keychain) (Config, error) {
 	cfg := defaults()
 
 	if err := applyBackend(&cfg, b); err != nil {
@@ -140,10 +141,14 @@ const (
 
 // GetAPIToken reads the API bearer token from the secret store. If none
 // exists, a random 256-bit hex-encoded token is generated and stored.
-func GetAPIToken(kc keychain) (string, error) {
+// Non-ErrNotFound errors from the keychain are propagated.
+func GetAPIToken(kc Keychain) (string, error) {
 	tok, err := kc.Get(apiTokenService, apiTokenAccount)
 	if err == nil && tok != "" {
 		return tok, nil
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("reading API token: %w", err)
 	}
 
 	b := make([]byte, 32)

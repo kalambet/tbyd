@@ -2,15 +2,26 @@
 
 package config
 
-import "os/exec"
+import (
+	"errors"
+	"os/exec"
+)
 
 func keychainGet(service, account string) ([]byte, error) {
-	return exec.Command(
+	out, err := exec.Command(
 		"security", "find-generic-password",
 		"-s", service,
 		"-a", account,
 		"-w",
 	).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 func keychainSet(service, account, value string) error {

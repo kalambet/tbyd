@@ -21,7 +21,10 @@ func (m *mockKeychain) Get(service, account string) (string, error) {
 	if m.store != nil {
 		v, ok := m.store[service+"/"+account]
 		if !ok {
-			return "", m.err
+			if m.err != nil {
+				return "", m.err
+			}
+			return "", ErrNotFound
 		}
 		return v, nil
 	}
