@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -63,25 +66,34 @@ func defaults() Config {
 	}
 }
 
+// Keychain abstracts platform secret store access.
+type Keychain interface {
+	Get(service, account string) (string, error)
+	Set(service, account, value string) error
+}
+
+// ErrNotFound is returned by Keychain.Get when the requested secret does not exist.
+var ErrNotFound = errors.New("secret not found")
+
 // Load reads configuration from the platform-native backend, environment
 // variables, and platform secret store.
 //
 // On macOS the backend is UserDefaults (domain: com.tbyd.app) and secrets
 // fall back to macOS Keychain.
 // On Linux the backend is a JSON file at $XDG_CONFIG_HOME/tbyd/config.json
-// and secrets must be provided via environment variables.
+// and secrets fall back to $XDG_DATA_HOME/tbyd/secrets.json.
 //
 // Environment variables (TBYD_*) override backend values on all platforms.
 func Load() (Config, error) {
-	return loadWith(newPlatformBackend(), keychainReader{})
+	return loadWith(newPlatformBackend(), keychainClient{})
 }
 
-// keychain abstracts Keychain access for testing.
-type keychain interface {
-	Get(service, account string) (string, error)
+// NewKeychain returns the platform keychain client for use outside config loading.
+func NewKeychain() Keychain {
+	return keychainClient{}
 }
 
-func loadWith(b ConfigBackend, kc keychain) (Config, error) {
+func loadWith(b ConfigBackend, kc Keychain) (Config, error) {
 	cfg := defaults()
 
 	if err := applyBackend(&cfg, b); err != nil {
@@ -107,13 +119,46 @@ func loadWith(b ConfigBackend, kc keychain) (Config, error) {
 	return cfg, nil
 }
 
-// keychainReader reads from macOS Keychain via the security CLI.
-type keychainReader struct{}
+// keychainClient reads from and writes to the platform secret store.
+type keychainClient struct{}
 
-func (keychainReader) Get(service, account string) (string, error) {
-	out, err := keychainExec(service, account)
+func (keychainClient) Get(service, account string) (string, error) {
+	out, err := keychainGet(service, account)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (keychainClient) Set(service, account, value string) error {
+	return keychainSet(service, account, value)
+}
+
+const (
+	apiTokenService = "tbyd"
+	apiTokenAccount = "tbyd-api-token"
+)
+
+// GetAPIToken reads the API bearer token from the secret store. If none
+// exists, a random 256-bit hex-encoded token is generated and stored.
+// Non-ErrNotFound errors from the keychain are propagated.
+func GetAPIToken(kc Keychain) (string, error) {
+	tok, err := kc.Get(apiTokenService, apiTokenAccount)
+	if err == nil && tok != "" {
+		return tok, nil
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", fmt.Errorf("reading API token: %w", err)
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating API token: %w", err)
+	}
+	tok = hex.EncodeToString(b)
+
+	if err := kc.Set(apiTokenService, apiTokenAccount, tok); err != nil {
+		return "", fmt.Errorf("storing API token: %w", err)
+	}
+	return tok, nil
 }

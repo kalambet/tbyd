@@ -216,6 +216,34 @@
 6. API token generated on first run and readable on second run
 7. `defaults write com.tbyd.app log.level -string debug` produces debug output
 
+### Manual smoke test (requires Ollama running with models loaded)
+
+> **TODO:** Run this once Ollama is available with `phi3.5` and `nomic-embed-text` pulled.
+
+```bash
+# 1. Ensure Ollama is running and models are available
+ollama list  # should show phi3.5 and nomic-embed-text
+
+# 2. Set debug log level
+defaults write com.tbyd.app log.level -string debug
+
+# 3. Start tbyd
+./bin/tbyd
+
+# Expected:
+# - "tbyd version dev" printed
+# - Debug-level log lines visible (level=DEBUG)
+# - "API bearer token available" logged at info level
+# - Server starts on 127.0.0.1:4000
+
+# 4. Verify API token persists across restarts
+# Kill tbyd (Ctrl+C), restart it — should not generate a new token
+# (check: no "storing API token" debug line on second run)
+
+# 5. Clean up
+defaults delete com.tbyd.app log.level
+```
+
 ---
 
 ## Suggested implementation order

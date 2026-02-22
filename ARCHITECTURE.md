@@ -708,7 +708,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **00.4** Add `context_vectors` table to migration
 - [x] **00.5** Add `jobs` table and model
 - [x] **00.6** Add job queue methods to Store
-- [ ] **00.7** API token generation and platform secret store
+- [x] **00.7** API token generation and platform secret store
 
 ### Phase 1 — Basic Enrichment
 - [x] **1.1** VectorStore integration + nomic-embed-text embedding pipeline

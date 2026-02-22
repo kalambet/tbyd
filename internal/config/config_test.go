@@ -1,17 +1,36 @@
 package config
 
 import (
+	"encoding/hex"
 	"testing"
 )
 
-// mockKeychain is a test double for the keychain interface.
+// mockKeychain is a test double for the Keychain interface.
 type mockKeychain struct {
-	value string
-	err   error
+	store     map[string]string // key = "service/account"
+	err       error
+	setCalled bool
 }
 
-func (m mockKeychain) Get(service, account string) (string, error) {
-	return m.value, m.err
+func newMockKeychain() *mockKeychain {
+	return &mockKeychain{store: make(map[string]string)}
+}
+
+func (m *mockKeychain) Get(service, account string) (string, error) {
+	v, ok := m.store[service+"/"+account]
+	if !ok {
+		if m.err != nil {
+			return "", m.err
+		}
+		return "", ErrNotFound
+	}
+	return v, nil
+}
+
+func (m *mockKeychain) Set(service, account, value string) error {
+	m.setCalled = true
+	m.store[service+"/"+account] = value
+	return nil
 }
 
 // mockBackend is an in-memory ConfigBackend for testing.
@@ -56,7 +75,8 @@ func (m *mockBackend) Delete(key string) error {
 // TestDefaults verifies all default values are applied when the backend is empty.
 func TestDefaults(t *testing.T) {
 	b := newMockBackend()
-	kc := mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -98,7 +118,8 @@ func TestBackendOverride(t *testing.T) {
 	b.strings["storage.data_dir"] = "/tmp/tbyd-test"
 	b.strings["proxy.default_model"] = "openai/gpt-4o"
 
-	kc := mockKeychain{value: "backend-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "backend-key"
 	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -138,7 +159,7 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "env-key")
 	t.Setenv("TBYD_SERVER_PORT", "6000")
 
-	cfg, err := loadWith(b, mockKeychain{})
+	cfg, err := loadWith(b, newMockKeychain())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +178,7 @@ func TestMissingRequiredField(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	_, err := loadWith(b, mockKeychain{})
+	_, err := loadWith(b, newMockKeychain())
 	if err == nil {
 		t.Fatal("expected error for missing API key, got nil")
 	}
@@ -174,7 +195,8 @@ func TestKeychainFallback(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	kc := mockKeychain{value: "keychain-secret"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "keychain-secret"
 	cfg, err := loadWith(b, kc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -192,7 +214,7 @@ func TestSecretNotReadFromBackend(t *testing.T) {
 
 	t.Setenv("TBYD_OPENROUTER_API_KEY", "")
 
-	_, err := loadWith(b, mockKeychain{})
+	_, err := loadWith(b, newMockKeychain())
 	if err == nil {
 		t.Fatal("expected error: secret should not be read from backend, so API key should be missing")
 	}
@@ -201,7 +223,8 @@ func TestSecretNotReadFromBackend(t *testing.T) {
 // TestDefaults_LogLevel verifies the default log level is "info".
 func TestDefaults_LogLevel(t *testing.T) {
 	b := newMockBackend()
-	kc := mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -217,7 +240,8 @@ func TestDefaults_LogLevel(t *testing.T) {
 func TestBackendOverride_LogLevel(t *testing.T) {
 	b := newMockBackend()
 	b.strings["log.level"] = "debug"
-	kc := mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	cfg, err := loadWith(b, kc)
 	if err != nil {
@@ -232,7 +256,8 @@ func TestBackendOverride_LogLevel(t *testing.T) {
 // TestEnvOverride_LogLevel verifies TBYD_LOG_LEVEL overrides backend.
 func TestEnvOverride_LogLevel(t *testing.T) {
 	b := newMockBackend()
-	kc := mockKeychain{value: "test-key"}
+	kc := newMockKeychain()
+	kc.store["tbyd/openrouter_api_key"] = "test-key"
 
 	t.Setenv("TBYD_LOG_LEVEL", "debug")
 
@@ -243,6 +268,63 @@ func TestEnvOverride_LogLevel(t *testing.T) {
 
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %q, want %q", cfg.Log.Level, "debug")
+	}
+}
+
+// TestGetAPIToken_GeneratesOnFirstCall verifies a new token is generated and stored.
+func TestGetAPIToken_GeneratesOnFirstCall(t *testing.T) {
+	kc := newMockKeychain()
+
+	tok, err := GetAPIToken(kc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(tok) != 64 {
+		t.Errorf("token length = %d, want 64 hex chars", len(tok))
+	}
+	if _, err := hex.DecodeString(tok); err != nil {
+		t.Fatalf("token is not a valid hex string: %v", err)
+	}
+	if !kc.setCalled {
+		t.Error("expected Set to be called to persist the token")
+	}
+}
+
+// TestGetAPIToken_ReturnsExisting verifies an existing token is returned without generating a new one.
+func TestGetAPIToken_ReturnsExisting(t *testing.T) {
+	kc := newMockKeychain()
+	kc.store["tbyd/tbyd-api-token"] = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+
+	tok, err := GetAPIToken(kc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tok != "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234" {
+		t.Errorf("token = %q, want existing token", tok)
+	}
+	if kc.setCalled {
+		t.Error("Set should NOT be called when token already exists")
+	}
+}
+
+// TestGetAPIToken_Deterministic verifies calling twice with the same mock returns the same token.
+func TestGetAPIToken_Deterministic(t *testing.T) {
+	kc := newMockKeychain()
+
+	tok1, err := GetAPIToken(kc)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	tok2, err := GetAPIToken(kc)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+
+	if tok1 != tok2 {
+		t.Errorf("tokens differ: %q vs %q", tok1, tok2)
 	}
 }
 
