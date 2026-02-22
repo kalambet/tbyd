@@ -24,7 +24,7 @@ func EnsureReady(ctx context.Context, c *Client, fastModel, embedModel string, w
 		}
 
 		fmt.Fprintf(w, "model %s: pulling...\n", model)
-		err := c.PullModel(ctx, model, func(p pullProgress) {
+		err := c.PullModel(ctx, model, func(p PullProgress) {
 			if p.Total > 0 {
 				pct := float64(p.Completed) / float64(p.Total) * 100
 				fmt.Fprintf(w, "  %s %.0f%%\n", p.Status, pct)

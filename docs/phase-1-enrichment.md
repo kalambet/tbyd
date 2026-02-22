@@ -98,7 +98,85 @@
 
 ---
 
-## Issue 1.3 — Context retrieval integration
+## Issue 1.3 — Local engine abstraction (backend-agnostic inference)
+
+**Context:** The codebase currently depends directly on `internal/ollama.Client` for chat, embedding, and model management. MLX-based inference servers (mlx-lm, oMLX) offer 20–40% faster inference and ~50% less memory on Apple Silicon, but the ecosystem is still immature. By abstracting the local inference backend behind an `Engine` interface now, we can swap from Ollama to MLX (or any OpenAI-compatible local server) later without touching consumers like intent extraction, embedding, or the enrichment pipeline.
+
+**Tasks:**
+- Create `internal/engine/engine.go` with the `Engine` interface:
+  ```go
+  type Engine interface {
+      // Chat sends messages to the given model and returns the assistant's response.
+      // When jsonSchema is non-nil, structured JSON output is requested.
+      Chat(ctx context.Context, model string, messages []Message, jsonSchema *Schema) (string, error)
+
+      // Embed returns the embedding vector for the given text using the specified model.
+      Embed(ctx context.Context, model string, text string) ([]float32, error)
+
+      // IsRunning reports whether the inference backend is reachable.
+      IsRunning(ctx context.Context) bool
+
+      // ListModels returns the names of all locally available models.
+      ListModels(ctx context.Context) ([]string, error)
+
+      // HasModel reports whether the given model name is available locally.
+      HasModel(ctx context.Context, name string) bool
+
+      // PullModel downloads a model. The optional callback receives progress updates.
+      PullModel(ctx context.Context, name string, onProgress func(PullProgress)) error
+  }
+  ```
+- Define shared types in `internal/engine/types.go`:
+  - `Message` (move from `ollama.Message`)
+  - `Schema`, `SchemaProperty` (move from `ollama.Schema`, `ollama.SchemaProperty`)
+  - `PullProgress` (mirrors `ollama.pullProgress`, now exported)
+- Create `internal/engine/startup.go`:
+  - `EnsureReady(ctx context.Context, e Engine, fastModel, embedModel string, w io.Writer) error` — move logic from `ollama.EnsureReady`, now takes `Engine` instead of `*ollama.Client`
+- Create `internal/engine/ollama.go`:
+  - `OllamaEngine` struct wrapping the existing `internal/ollama.Client`
+  - Implement all `Engine` methods by delegating to the underlying `ollama.Client`
+  - Constructor: `NewOllamaEngine(baseURL string) *OllamaEngine`
+  - The `internal/ollama` package remains as-is (HTTP client); `OllamaEngine` is the adapter
+- Create `internal/engine/detect.go`:
+  - `Detect(cfg Config) (Engine, error)` — for now, always returns `OllamaEngine`; future: probe for MLX server on a configurable port, return `MLXEngine` if available
+  - Accept a simple config struct or the relevant fields (base URL, etc.)
+- Create `internal/engine/mlx.go` (stub):
+  - `MLXEngine` struct with placeholder fields
+  - All `Engine` methods return `fmt.Errorf("mlx engine not yet implemented")`
+  - Comment documenting the planned MLX integration path
+- Update `cmd/tbyd/main.go`:
+  - Replace `ollama.New(...)` + `ollama.EnsureReady(...)` with `engine.Detect(...)` + `engine.EnsureReady(...)`
+  - Pass the `Engine` to downstream consumers instead of `*ollama.Client`
+- Update `internal/retrieval/embedder.go` (from issue 1.1):
+  - Change `Embedder` to accept `engine.Engine` instead of `ollama.Client`
+- Do **not** change config keys yet — `ollama.*` keys are fine since Ollama is the only backend; generalize when MLX support lands
+
+**Unit tests** (`internal/engine/ollama_test.go`) — use httptest server (migrate relevant tests from `internal/ollama/client_test.go`):
+- `TestOllamaEngine_Chat` — mock HTTP returns assistant response; verify `Engine.Chat` returns it
+- `TestOllamaEngine_Embed` — mock HTTP returns embedding vector; verify `Engine.Embed` returns it
+- `TestOllamaEngine_IsRunning` — mock returns 200 on `/api/tags`; verify `true`
+- `TestOllamaEngine_IsRunning_Down` — closed server; verify `false`
+- `TestOllamaEngine_HasModel` — mock returns model list; verify present/absent detection
+- `TestOllamaEngine_PullModel` — mock streams progress JSON; verify progress callback invoked
+
+**Unit tests** (`internal/engine/startup_test.go`) — mock `Engine`:
+- `TestEnsureReady_AllModelsPresent` — mock `HasModel` returns true for both; verify no `PullModel` calls
+- `TestEnsureReady_PullsMissing` — mock `HasModel` returns false; verify `PullModel` called
+- `TestEnsureReady_EngineDown` — mock `IsRunning` returns false; verify error returned
+
+**Unit tests** (`internal/engine/detect_test.go`):
+- `TestDetect_ReturnsOllama` — verify `Detect` returns an `*OllamaEngine`
+
+**Acceptance criteria:**
+- All existing consumers (`retrieval.Embedder`, `intent.Extractor`, `cmd/tbyd/main.go`) use `engine.Engine` instead of `*ollama.Client` directly
+- `go test ./internal/engine/...` passes
+- `go test ./internal/ollama/...` still passes (package unchanged, still used internally by `OllamaEngine`)
+- No behavioral change — the system works identically to before the refactor
+- Future MLX integration requires only implementing `engine.Engine` in `mlx.go` and updating `Detect()`
+
+---
+
+## Issue 1.4 — Context retrieval integration
 
 **Context:** Using extracted intent + original query, retrieve the most relevant stored context chunks from the VectorStore. The retrieval step combines semantic search with metadata filtering.
 
@@ -129,7 +207,7 @@
 
 ---
 
-## Issue 1.4 — User profile manager
+## Issue 1.5 — User profile manager
 
 **Context:** The user profile is the "digital self" — structured JSON stored in SQLite. It is read at enrichment time and injected into the prompt. Must be fast to read.
 
@@ -173,7 +251,7 @@
 
 ---
 
-## Issue 1.5 — Prompt composer
+## Issue 1.6 — Prompt composer
 
 **Context:** Assembles the enriched prompt from: user profile summary, retrieved context chunks, and the original user query. The output is a structured `ChatRequest` ready to send to OpenRouter.
 
@@ -215,7 +293,7 @@
 
 ---
 
-## Issue 1.6 — Enrichment pipeline orchestrator
+## Issue 1.7 — Enrichment pipeline orchestrator
 
 **Context:** Wires together intent extraction, retrieval, profile loading, and prompt composition into a single pipeline called by the API handler.
 

@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/engine"
 	_ "modernc.org/sqlite"
 )
 
 func TestRetrieveSemanticMatch(t *testing.T) {
-	client := ollama.New("http://localhost:11434")
-	if !client.IsRunning(context.Background()) {
+	eng := engine.NewOllamaEngine("http://localhost:11434")
+	if !eng.IsRunning(context.Background()) {
 		t.Skip("Ollama is not running, skipping integration test")
 	}
 
@@ -40,7 +40,7 @@ func TestRetrieveSemanticMatch(t *testing.T) {
 	}
 
 	store := NewSQLiteStore(db)
-	embedder := NewEmbedder(client, "nomic-embed-text")
+	embedder := NewEmbedder(eng, "nomic-embed-text")
 	retriever := NewRetriever(embedder, store)
 
 	// Insert a document.

@@ -125,8 +125,8 @@ type pullRequest struct {
 	Stream bool   `json:"stream"`
 }
 
-// pullProgress is one line of the streamed pull response.
-type pullProgress struct {
+// PullProgress is one line of the streamed pull response.
+type PullProgress struct {
 	Status    string `json:"status"`
 	Total     int64  `json:"total,omitempty"`
 	Completed int64  `json:"completed,omitempty"`
@@ -134,7 +134,7 @@ type pullProgress struct {
 
 // PullModel downloads a model, reading the streamed progress to completion.
 // The optional progress callback receives each progress line; pass nil to ignore.
-func (c *Client) PullModel(ctx context.Context, name string, onProgress func(pullProgress)) error {
+func (c *Client) PullModel(ctx context.Context, name string, onProgress func(PullProgress)) error {
 	body, err := json.Marshal(pullRequest{Name: name, Stream: true})
 	if err != nil {
 		return err
@@ -158,7 +158,7 @@ func (c *Client) PullModel(ctx context.Context, name string, onProgress func(pul
 
 	dec := json.NewDecoder(resp.Body)
 	for {
-		var p pullProgress
+		var p PullProgress
 		if err := dec.Decode(&p); err == io.EOF {
 			break
 		} else if err != nil {

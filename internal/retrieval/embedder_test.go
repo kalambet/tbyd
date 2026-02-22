@@ -3,17 +3,29 @@ package retrieval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/kalambet/tbyd/internal/engine"
 )
 
-// mockOllamaEmbedder implements OllamaEmbedder for testing.
-type mockOllamaEmbedder struct {
+// mockEngine implements engine.Engine for testing.
+type mockEngine struct {
 	embedFn func(ctx context.Context, model string, text string) ([]float32, error)
 }
 
-func (m *mockOllamaEmbedder) Embed(ctx context.Context, model string, text string) ([]float32, error) {
+func (m *mockEngine) Chat(_ context.Context, _ string, _ []engine.Message, _ *engine.Schema) (string, error) {
+	return "", fmt.Errorf("not implemented")
+}
+func (m *mockEngine) Embed(ctx context.Context, model string, text string) ([]float32, error) {
 	return m.embedFn(ctx, model, text)
+}
+func (m *mockEngine) IsRunning(_ context.Context) bool                          { return false }
+func (m *mockEngine) ListModels(_ context.Context) ([]string, error)            { return nil, nil }
+func (m *mockEngine) HasModel(_ context.Context, _ string) bool                 { return false }
+func (m *mockEngine) PullModel(_ context.Context, _ string, _ func(engine.PullProgress)) error {
+	return fmt.Errorf("not implemented")
 }
 
 func makeVector(dim int) []float32 {
@@ -25,7 +37,7 @@ func makeVector(dim int) []float32 {
 }
 
 func TestEmbed_ReturnsDimension(t *testing.T) {
-	mock := &mockOllamaEmbedder{
+	mock := &mockEngine{
 		embedFn: func(_ context.Context, _ string, _ string) ([]float32, error) {
 			return makeVector(384), nil
 		},
@@ -42,7 +54,7 @@ func TestEmbed_ReturnsDimension(t *testing.T) {
 }
 
 func TestEmbed_OllamaError(t *testing.T) {
-	mock := &mockOllamaEmbedder{
+	mock := &mockEngine{
 		embedFn: func(_ context.Context, _ string, _ string) ([]float32, error) {
 			return nil, errors.New("connection refused")
 		},
@@ -56,7 +68,7 @@ func TestEmbed_OllamaError(t *testing.T) {
 }
 
 func TestEmbedBatch_CountMatches(t *testing.T) {
-	mock := &mockOllamaEmbedder{
+	mock := &mockEngine{
 		embedFn: func(_ context.Context, _ string, _ string) ([]float32, error) {
 			return makeVector(384), nil
 		},
@@ -73,7 +85,7 @@ func TestEmbedBatch_CountMatches(t *testing.T) {
 }
 
 func TestEmbedBatch_OllamaError(t *testing.T) {
-	mock := &mockOllamaEmbedder{
+	mock := &mockEngine{
 		embedFn: func(_ context.Context, _ string, text string) ([]float32, error) {
 			if text == "b" {
 				return nil, errors.New("embedding failed")
@@ -93,7 +105,7 @@ func TestEmbedBatch_OllamaError(t *testing.T) {
 }
 
 func TestEmbedBatch_EmptyInput(t *testing.T) {
-	mock := &mockOllamaEmbedder{
+	mock := &mockEngine{
 		embedFn: func(_ context.Context, _ string, _ string) ([]float32, error) {
 			t.Fatal("should not be called for empty input")
 			return nil, nil
