@@ -2,11 +2,14 @@ package retrieval
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kalambet/tbyd/internal/intent"
+	"golang.org/x/sync/errgroup"
 )
 
 // ContextChunk is a retrieved context fragment with its similarity score.
@@ -69,12 +72,6 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		return nil
 	}
 
-	// Embed the original query.
-	queryVec, err := r.embedder.Embed(ctx, query)
-	if err != nil {
-		return nil
-	}
-
 	// Build a best-effort filter from intent topics.
 	// The SQLite backend currently ignores this; future backends (LanceDB)
 	// will use it for metadata filtering.
@@ -90,24 +87,41 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		perSearchK = topK * 2
 	}
 
+	// Embed and search query + each entity concurrently.
+	textsToSearch := make([]string, 0, 1+len(intent.Entities))
+	textsToSearch = append(textsToSearch, query)
+	textsToSearch = append(textsToSearch, intent.Entities...)
+
 	var allScored []ScoredRecord
+	var mu sync.Mutex
 
-	results, err := r.store.Search("context_vectors", queryVec, perSearchK, filter)
-	if err == nil {
-		allScored = append(allScored, results...)
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(4)
+
+	for _, text := range textsToSearch {
+		g.Go(func() error {
+			vec, err := r.embedder.Embed(gCtx, text)
+			if err != nil {
+				slog.Warn("retrieval embed failed, skipping", "text", text, "error", err)
+				return nil
+			}
+
+			results, err := r.store.Search("context_vectors", vec, perSearchK, filter)
+			if err != nil {
+				slog.Warn("retrieval search failed, skipping", "text", text, "error", err)
+				return nil
+			}
+
+			if len(results) > 0 {
+				mu.Lock()
+				allScored = append(allScored, results...)
+				mu.Unlock()
+			}
+			return nil
+		})
 	}
 
-	// Embed and search each entity separately.
-	for _, entity := range intent.Entities {
-		entityVec, err := r.embedder.Embed(ctx, entity)
-		if err != nil {
-			continue
-		}
-		results, err := r.store.Search("context_vectors", entityVec, perSearchK, filter)
-		if err == nil {
-			allScored = append(allScored, results...)
-		}
-	}
+	_ = g.Wait()
 
 	if len(allScored) == 0 {
 		return nil
