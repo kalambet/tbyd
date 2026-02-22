@@ -74,7 +74,7 @@ func run() error {
 
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	handler := api.NewOpenAIHandler(proxyClient)
+	handler := api.NewOpenAIHandler(proxyClient, eng)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
 	srv := &http.Server{

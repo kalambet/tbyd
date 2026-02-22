@@ -11,7 +11,7 @@ import (
 // written to w.
 func EnsureReady(ctx context.Context, e Engine, fastModel, embedModel string, w io.Writer) error {
 	if !e.IsRunning(ctx) {
-		return fmt.Errorf("local inference engine is not running. Start it with: ollama serve")
+		return fmt.Errorf("local inference engine is not running; please ensure the backend is started")
 	}
 
 	for _, model := range []string{fastModel, embedModel} {

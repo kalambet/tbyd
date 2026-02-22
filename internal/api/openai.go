@@ -10,14 +10,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/kalambet/tbyd/internal/engine"
 	"github.com/kalambet/tbyd/internal/proxy"
 )
 
 const maxRequestBodySize = 1 << 20 // 1MB
 
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
-// REST API in passthrough mode.
-func NewOpenAIHandler(p *proxy.Client) http.Handler {
+// REST API. The engine parameter is the local inference backend used for
+// enrichment (intent extraction, embedding). Passing nil disables enrichment
+// (passthrough mode).
+func NewOpenAIHandler(p *proxy.Client, eng engine.Engine) http.Handler {
+	_ = eng // will be used by enrichment pipeline (issue 1.7)
 	r := chi.NewRouter()
 
 	r.Get("/health", handleHealth)
