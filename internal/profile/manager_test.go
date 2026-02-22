@@ -48,6 +48,12 @@ func (m *mockStore) GetAllProfileKeys() (map[string]string, error) {
 	return cp, nil
 }
 
+func (m *mockStore) GetAllProfileKeysCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getAllCalls
+}
+
 // --- Mock clock ---
 
 type mockClock struct {
@@ -106,7 +112,10 @@ func TestGetSummary_Empty(t *testing.T) {
 	store := newMockStore()
 	mgr := NewManager(store)
 
-	summary := mgr.GetSummary()
+	summary, err := mgr.GetSummary()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if summary == "" {
 		t.Error("expected non-empty summary for empty profile")
 	}
@@ -129,7 +138,10 @@ func TestGetSummary_Full(t *testing.T) {
 		t.Fatalf("SetField(expertise) error: %v", err)
 	}
 
-	summary := mgr.GetSummary()
+	summary, err := mgr.GetSummary()
+	if err != nil {
+		t.Fatalf("GetSummary error: %v", err)
+	}
 
 	checks := []string{"software engineer", "direct", "privacy tech"}
 	for _, want := range checks {
@@ -151,7 +163,10 @@ func TestGetSummary_TokenBudget(t *testing.T) {
 		t.Fatalf("SetField(preferences) error: %v", err)
 	}
 
-	summary := mgr.GetSummary()
+	summary, err := mgr.GetSummary()
+	if err != nil {
+		t.Fatalf("GetSummary error: %v", err)
+	}
 	tokens := len(summary) / 4
 	if tokens >= 500 {
 		t.Errorf("summary too long: %d estimated tokens (len=%d)", tokens, len(summary))
@@ -168,16 +183,12 @@ func TestCacheTTL(t *testing.T) {
 	mgr.GetProfile()
 	mgr.GetProfile()
 
-	store.mu.Lock()
-	calls := store.getAllCalls
-	store.mu.Unlock()
-
-	if calls != 1 {
+	if calls := store.GetAllProfileKeysCalls(); calls != 1 {
 		t.Errorf("expected 1 store call (cache hit on second), got %d", calls)
 	}
 }
 
-func TestCacheInvalidation(t *testing.T) {
+func TestCacheInvalidation_TTLExpiry(t *testing.T) {
 	store := newMockStore()
 	clock := &mockClock{now: time.Now()}
 	ttl := 60 * time.Second
@@ -194,11 +205,30 @@ func TestCacheInvalidation(t *testing.T) {
 
 	mgr.GetProfile()
 
-	store.mu.Lock()
-	calls := store.getAllCalls
-	store.mu.Unlock()
-
-	if calls != 2 {
+	if calls := store.GetAllProfileKeysCalls(); calls != 2 {
 		t.Errorf("expected 2 store calls (cache expired), got %d", calls)
+	}
+}
+
+func TestCacheInvalidation_SetField(t *testing.T) {
+	store := newMockStore()
+	clock := &mockClock{now: time.Now()}
+	mgr := NewManagerWithClock(store, clock, 60*time.Second)
+
+	// Populate cache.
+	mgr.GetProfile()
+	if calls := store.GetAllProfileKeysCalls(); calls != 1 {
+		t.Fatalf("expected 1 store call after first GetProfile, got %d", calls)
+	}
+
+	// SetField should invalidate cache.
+	if err := mgr.SetField("identity.role", "engineer"); err != nil {
+		t.Fatalf("SetField error: %v", err)
+	}
+
+	// Next GetProfile should re-query the store.
+	mgr.GetProfile()
+	if calls := store.GetAllProfileKeysCalls(); calls != 2 {
+		t.Errorf("expected 2 store calls after SetField + GetProfile, got %d", calls)
 	}
 }

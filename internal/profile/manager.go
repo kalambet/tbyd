@@ -32,7 +32,7 @@ type Manager struct {
 	clock Clock
 	ttl   time.Duration
 
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	cached    *Profile
 	cachedAt  time.Time
 }
@@ -58,9 +58,20 @@ func NewManagerWithClock(store ProfileStore, clock Clock, ttl time.Duration) *Ma
 // GetProfile reads all profile keys from storage (or cache) and assembles
 // a structured Profile. Returns a zero-value Profile on empty store.
 func (m *Manager) GetProfile() (Profile, error) {
+	// Fast path: read lock for cache hit.
+	m.mu.RLock()
+	if m.cached != nil && m.clock.Now().Before(m.cachedAt.Add(m.ttl)) {
+		p := *m.cached
+		m.mu.RUnlock()
+		return p, nil
+	}
+	m.mu.RUnlock()
+
+	// Slow path: write lock for cache miss.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Double-check after acquiring write lock.
 	if m.cached != nil && m.clock.Now().Before(m.cachedAt.Add(m.ttl)) {
 		return *m.cached, nil
 	}
@@ -103,9 +114,12 @@ func (m *Manager) SetField(key string, value interface{}) error {
 
 // GetSummary returns a compact string representation of the profile suitable
 // for injection into a system prompt. Targets < 500 tokens (~2000 chars).
-func (m *Manager) GetSummary() string {
-	p, _ := m.GetProfile()
-	return summarize(p)
+func (m *Manager) GetSummary() (string, error) {
+	p, err := m.GetProfile()
+	if err != nil {
+		return "", fmt.Errorf("getting profile for summary: %w", err)
+	}
+	return summarize(p), nil
 }
 
 // maxSummaryChars caps the summary to stay under ~500 tokens (4 chars/token).
