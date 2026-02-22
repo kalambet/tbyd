@@ -4,28 +4,24 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/kalambet/tbyd/internal/engine"
 	"golang.org/x/sync/errgroup"
 )
 
-// OllamaEmbedder is the interface for generating embeddings via Ollama.
-type OllamaEmbedder interface {
-	Embed(ctx context.Context, model string, text string) ([]float32, error)
-}
-
-// Embedder wraps an Ollama client to generate text embeddings.
+// Embedder wraps an Engine to generate text embeddings.
 type Embedder struct {
-	client OllamaEmbedder
+	engine engine.Engine
 	model  string
 }
 
-// NewEmbedder creates an Embedder using the given Ollama client and model name.
-func NewEmbedder(client OllamaEmbedder, model string) *Embedder {
-	return &Embedder{client: client, model: model}
+// NewEmbedder creates an Embedder using the given Engine and model name.
+func NewEmbedder(e engine.Engine, model string) *Embedder {
+	return &Embedder{engine: e, model: model}
 }
 
 // Embed returns the embedding vector for a single text.
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	vec, err := e.client.Embed(ctx, e.model, text)
+	vec, err := e.engine.Embed(ctx, e.model, text)
 	if err != nil {
 		return nil, fmt.Errorf("embedding text: %w", err)
 	}
@@ -40,12 +36,12 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32,
 	}
 	results := make([][]float32, len(texts))
 	g, gCtx := errgroup.WithContext(ctx)
-	g.SetLimit(4) // Bound concurrency to avoid overwhelming Ollama.
+	g.SetLimit(4) // Bound concurrency to avoid overwhelming the engine.
 
 	for i, text := range texts {
-		i, text := i, text // Capture loop variables for the goroutine.
+		i, text := i, text
 		g.Go(func() error {
-			vec, err := e.client.Embed(gCtx, e.model, text)
+			vec, err := e.engine.Embed(gCtx, e.model, text)
 			if err != nil {
 				return fmt.Errorf("embedding text %d: %w", i, err)
 			}

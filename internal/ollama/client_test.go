@@ -221,15 +221,15 @@ func TestPullModel_Progress(t *testing.T) {
 
 		// Stream progress lines as newline-delimited JSON.
 		enc := json.NewEncoder(w)
-		enc.Encode(pullProgress{Status: "downloading", Total: 1000, Completed: 500})
-		enc.Encode(pullProgress{Status: "downloading", Total: 1000, Completed: 1000})
-		enc.Encode(pullProgress{Status: "success"})
+		enc.Encode(PullProgress{Status: "downloading", Total: 1000, Completed: 500})
+		enc.Encode(PullProgress{Status: "downloading", Total: 1000, Completed: 1000})
+		enc.Encode(PullProgress{Status: "success"})
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL)
 	var progressCount int
-	err := c.PullModel(context.Background(), "phi3.5", func(p pullProgress) {
+	err := c.PullModel(context.Background(), "phi3.5", func(p PullProgress) {
 		progressCount++
 	})
 	if err != nil {

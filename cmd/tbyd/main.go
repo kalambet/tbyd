@@ -13,7 +13,7 @@ import (
 
 	"github.com/kalambet/tbyd/internal/api"
 	"github.com/kalambet/tbyd/internal/config"
-	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/engine"
 	"github.com/kalambet/tbyd/internal/proxy"
 	"github.com/kalambet/tbyd/internal/storage"
 )
@@ -52,9 +52,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Check Ollama readiness.
-	ollamaClient := ollama.New(cfg.Ollama.BaseURL)
-	if err := ollama.EnsureReady(ctx, ollamaClient, cfg.Ollama.FastModel, cfg.Ollama.EmbedModel, os.Stdout); err != nil {
+	// Detect and check local inference engine readiness.
+	eng, err := engine.Detect(engine.DetectConfig{OllamaBaseURL: cfg.Ollama.BaseURL})
+	if err != nil {
+		return fmt.Errorf("detecting inference engine: %w", err)
+	}
+	if err := engine.EnsureReady(ctx, eng, cfg.Ollama.FastModel, cfg.Ollama.EmbedModel, os.Stdout); err != nil {
 		return err
 	}
 
