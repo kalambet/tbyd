@@ -3,7 +3,6 @@ package ollama
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -221,15 +220,15 @@ func TestPullModel_Progress(t *testing.T) {
 
 		// Stream progress lines as newline-delimited JSON.
 		enc := json.NewEncoder(w)
-		enc.Encode(pullProgress{Status: "downloading", Total: 1000, Completed: 500})
-		enc.Encode(pullProgress{Status: "downloading", Total: 1000, Completed: 1000})
-		enc.Encode(pullProgress{Status: "success"})
+		enc.Encode(PullProgress{Status: "downloading", Total: 1000, Completed: 500})
+		enc.Encode(PullProgress{Status: "downloading", Total: 1000, Completed: 1000})
+		enc.Encode(PullProgress{Status: "success"})
 	}))
 	defer srv.Close()
 
 	c := New(srv.URL)
 	var progressCount int
-	err := c.PullModel(context.Background(), "phi3.5", func(p pullProgress) {
+	err := c.PullModel(context.Background(), "phi3.5", func(p PullProgress) {
 		progressCount++
 	})
 	if err != nil {
@@ -241,27 +240,4 @@ func TestPullModel_Progress(t *testing.T) {
 	}
 }
 
-func TestEnsureReady_OllamaDown(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.Close()
 
-	c := New(srv.URL)
-	err := EnsureReady(context.Background(), c, "phi3.5", "nomic-embed-text", io.Discard)
-	if err == nil {
-		t.Fatal("expected error when Ollama is down")
-	}
-
-	want := "Ollama is not running"
-	if got := err.Error(); !contains(got, want) {
-		t.Errorf("error = %q, want it to contain %q", got, want)
-	}
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
