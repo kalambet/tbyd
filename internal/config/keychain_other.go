@@ -33,6 +33,9 @@ func keychainGet(service, account string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("reading secrets file: %w", err)
 	}
+	if len(data) == 0 {
+		return nil, ErrNotFound
+	}
 	var secrets map[string]map[string]string
 	if err := json.Unmarshal(data, &secrets); err != nil {
 		return nil, fmt.Errorf("parsing secrets file: %w", err)
@@ -60,7 +63,7 @@ func keychainSet(service, account, value string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading secrets file: %w", err)
 	}
-	if err == nil {
+	if err == nil && len(data) > 0 {
 		if err := json.Unmarshal(data, &secrets); err != nil {
 			return fmt.Errorf("parsing secrets file: %w", err)
 		}
