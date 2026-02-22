@@ -49,7 +49,7 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []o
 
 	messages := BuildPrompt(query, recentHistory, profileSummary)
 
-	raw, err := e.client.Chat(ctx, e.model, messages, intentSchema())
+	raw, err := e.client.Chat(ctx, e.model, messages, &intentSchema)
 	if err != nil {
 		slog.Warn("intent extraction chat failed", "error", err)
 		return Intent{}
@@ -63,17 +63,15 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []o
 	return result
 }
 
-// intentSchema returns the Ollama JSON schema for structured intent output.
-func intentSchema() *ollama.Schema {
-	return &ollama.Schema{
-		Type: "object",
-		Properties: map[string]ollama.SchemaProperty{
-			"intent_type":   {Type: "string", Description: "One of: recall, task, question, preference_update"},
-			"entities":      {Type: "array", Description: "Named entities mentioned in the query"},
-			"topics":        {Type: "array", Description: "Semantic topic tags"},
-			"context_needs": {Type: "array", Description: "What kind of context would help answer this query"},
-			"is_private":    {Type: "boolean", Description: "Whether the user flagged this as sensitive"},
-		},
-		Required: []string{"intent_type", "entities", "topics", "context_needs", "is_private"},
-	}
+// intentSchema is the static Ollama JSON schema for structured intent output.
+var intentSchema = ollama.Schema{
+	Type: "object",
+	Properties: map[string]ollama.SchemaProperty{
+		"intent_type":   {Type: "string", Description: "One of: recall, task, question, preference_update"},
+		"entities":      {Type: "array", Description: "Named entities mentioned in the query"},
+		"topics":        {Type: "array", Description: "Semantic topic tags"},
+		"context_needs": {Type: "array", Description: "What kind of context would help answer this query"},
+		"is_private":    {Type: "boolean", Description: "Whether the user flagged this as sensitive"},
+	},
+	Required: []string{"intent_type", "entities", "topics", "context_needs", "is_private"},
 }

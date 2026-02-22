@@ -7,18 +7,20 @@ import (
 	"github.com/kalambet/tbyd/internal/ollama"
 )
 
-func TestPromptContainsInstructions(t *testing.T) {
+func TestPromptContainsSchema(t *testing.T) {
 	messages := BuildPrompt("test query", nil, "")
 
 	system := messages[0].Content
-	if !strings.Contains(system, "intent extraction engine") {
-		t.Error("system prompt does not contain role instruction")
+	for _, field := range []string{"intent_type", "entities", "topics", "context_needs", "is_private"} {
+		if !strings.Contains(system, field) {
+			t.Errorf("system prompt does not contain schema field %q", field)
+		}
+	}
+	if !strings.Contains(system, "Output schema:") {
+		t.Error("system prompt does not contain schema section header")
 	}
 	if !strings.Contains(system, "recall") {
 		t.Error("system prompt does not contain intent type definitions")
-	}
-	if !strings.Contains(system, "is_private") {
-		t.Error("system prompt does not contain privacy rule")
 	}
 }
 
