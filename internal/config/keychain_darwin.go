@@ -25,15 +25,10 @@ func keychainGet(service, account string) ([]byte, error) {
 }
 
 func keychainSet(service, account, value string) error {
-	// Delete any existing item first (add-generic-password fails on duplicates).
-	_ = exec.Command(
-		"security", "delete-generic-password",
-		"-s", service,
-		"-a", account,
-	).Run()
-
+	// The -U flag updates the item if it exists, or creates it if it doesn't.
 	return exec.Command(
 		"security", "add-generic-password",
+		"-U",
 		"-s", service,
 		"-a", account,
 		"-w", value,

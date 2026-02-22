@@ -79,7 +79,7 @@ func keychainSet(service, account, value string) error {
 	}
 	out, err := json.MarshalIndent(secrets, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling secrets: %w", err)
 	}
 
 	// Atomic write: write to temp file then rename into place.
@@ -87,5 +87,8 @@ func keychainSet(service, account, value string) error {
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return fmt.Errorf("writing secrets temp file: %w", err)
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		return fmt.Errorf("renaming secrets temp file: %w", err)
+	}
+	return nil
 }

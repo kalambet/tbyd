@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"testing"
 )
 
@@ -283,10 +284,8 @@ func TestGetAPIToken_GeneratesOnFirstCall(t *testing.T) {
 	if len(tok) != 64 {
 		t.Errorf("token length = %d, want 64 hex chars", len(tok))
 	}
-	for _, c := range tok {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			t.Fatalf("token contains non-hex char: %q", c)
-		}
+	if _, err := hex.DecodeString(tok); err != nil {
+		t.Fatalf("token is not a valid hex string: %v", err)
 	}
 	if !kc.setCalled {
 		t.Error("expected Set to be called to persist the token")
