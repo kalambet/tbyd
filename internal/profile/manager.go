@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // ProfileStore defines the storage operations the Manager needs.
@@ -61,7 +62,7 @@ func (m *Manager) GetProfile() (Profile, error) {
 	// Fast path: read lock for cache hit.
 	m.mu.RLock()
 	if m.cached != nil && m.clock.Now().Before(m.cachedAt.Add(m.ttl)) {
-		p := *m.cached
+		p := deepCopyProfile(m.cached)
 		m.mu.RUnlock()
 		return p, nil
 	}
@@ -73,7 +74,7 @@ func (m *Manager) GetProfile() (Profile, error) {
 
 	// Double-check after acquiring write lock.
 	if m.cached != nil && m.clock.Now().Before(m.cachedAt.Add(m.ttl)) {
-		return *m.cached, nil
+		return deepCopyProfile(m.cached), nil
 	}
 
 	keys, err := m.store.GetAllProfileKeys()
@@ -183,13 +184,51 @@ func summarize(p Profile) string {
 
 	summary := strings.Join(parts, " ")
 	if len(summary) > maxSummaryChars {
-		if idx := strings.LastIndex(summary[:maxSummaryChars], " "); idx > 0 {
+		// Ensure we don't split a multi-byte UTF-8 character.
+		end := maxSummaryChars
+		for end > 0 && !utf8.RuneStart(summary[end]) {
+			end--
+		}
+		if idx := strings.LastIndex(summary[:end], " "); idx > 0 {
 			summary = summary[:idx]
 		} else {
-			summary = summary[:maxSummaryChars]
+			summary = summary[:end]
 		}
 	}
 	return summary
+}
+
+func deepCopyProfile(p *Profile) Profile {
+	if p == nil {
+		return Profile{}
+	}
+	cp := *p
+
+	if p.Interests != nil {
+		cp.Interests = make([]string, len(p.Interests))
+		copy(cp.Interests, p.Interests)
+	}
+	if p.Expertise != nil {
+		cp.Expertise = make(map[string]string, len(p.Expertise))
+		for k, v := range p.Expertise {
+			cp.Expertise[k] = v
+		}
+	}
+	if p.Opinions != nil {
+		cp.Opinions = make([]string, len(p.Opinions))
+		copy(cp.Opinions, p.Opinions)
+	}
+	if p.Preferences != nil {
+		cp.Preferences = make([]string, len(p.Preferences))
+		copy(cp.Preferences, p.Preferences)
+	}
+	if p.Identity.WorkingContext != nil {
+		cp.Identity.WorkingContext = make(map[string]string, len(p.Identity.WorkingContext))
+		for k, v := range p.Identity.WorkingContext {
+			cp.Identity.WorkingContext[k] = v
+		}
+	}
+	return cp
 }
 
 // buildProfile assembles a Profile from flat key-value pairs.
