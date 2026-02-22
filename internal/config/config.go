@@ -9,11 +9,12 @@ import (
 )
 
 type Config struct {
-	Server  ServerConfig
-	Ollama  OllamaConfig
-	Storage StorageConfig
-	Proxy   ProxyConfig
-	Log     LogConfig
+	Server    ServerConfig
+	Ollama    OllamaConfig
+	Storage   StorageConfig
+	Proxy     ProxyConfig
+	Log       LogConfig
+	Retrieval RetrievalConfig
 }
 
 type LogConfig struct {
@@ -41,6 +42,10 @@ type ProxyConfig struct {
 	DefaultModel     string
 }
 
+type RetrievalConfig struct {
+	TopK int // default 5
+}
+
 func defaults() Config {
 	dataDir := defaultDataDir()
 	return Config{
@@ -62,6 +67,9 @@ func defaults() Config {
 		},
 		Log: LogConfig{
 			Level: "info",
+		},
+		Retrieval: RetrievalConfig{
+			TopK: 5,
 		},
 	}
 }

@@ -712,9 +712,9 @@ Each phase has a detailed issue breakdown in `docs/`:
 
 ### Phase 1 — Basic Enrichment
 - [x] **1.1** VectorStore integration + nomic-embed-text embedding pipeline
-- [ ] **1.2** Intent extraction via local LLM (phi3.5)
-- [ ] **1.3** Local engine abstraction (backend-agnostic inference)
-- [ ] **1.4** Context retrieval integration
+- [x] **1.2** Intent extraction via local LLM (phi3.5)
+- [x] **1.3** Local engine abstraction (backend-agnostic inference)
+- [x] **1.4** Context retrieval integration
 - [ ] **1.5** User profile manager
 - [ ] **1.6** Prompt composer (structured format)
 - [ ] **1.7** Enrichment pipeline orchestrator
