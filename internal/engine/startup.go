@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 )
 
 // EnsureReady checks that the Engine is reachable and required models are
@@ -41,6 +42,22 @@ func EnsureReady(ctx context.Context, e Engine, fastModel, embedModel string, w 
 			return fmt.Errorf("pulling model %s: %w", model, err)
 		}
 		fmt.Fprintf(w, "model %s: ready\n", model)
+	}
+
+	// Warm up the fast model by sending a trivial chat request so it stays
+	// loaded in memory for low-latency intent extraction.
+	if fastModel != "" {
+		fmt.Fprintf(w, "model %s: warming up...\n", fastModel)
+		warmCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		_, err := e.Chat(warmCtx, fastModel, []Message{
+			{Role: "user", Content: "ping"},
+		}, nil)
+		if err != nil {
+			fmt.Fprintf(w, "model %s: warm-up failed (non-fatal): %v\n", fastModel, err)
+		} else {
+			fmt.Fprintf(w, "model %s: warm\n", fastModel)
+		}
 	}
 
 	return nil
