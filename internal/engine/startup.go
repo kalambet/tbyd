@@ -14,7 +14,15 @@ func EnsureReady(ctx context.Context, e Engine, fastModel, embedModel string, w 
 		return fmt.Errorf("local inference engine is not running; please ensure the backend is started")
 	}
 
-	for _, model := range []string{fastModel, embedModel} {
+	models := make([]string, 0, 2)
+	if fastModel != "" {
+		models = append(models, fastModel)
+	}
+	if embedModel != "" && embedModel != fastModel {
+		models = append(models, embedModel)
+	}
+
+	for _, model := range models {
 		if e.HasModel(ctx, model) {
 			fmt.Fprintf(w, "model %s: ready\n", model)
 			continue
