@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -252,26 +253,21 @@ func handleDeleteInteraction(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 
-		// Clean up vectors if VectorStore is available.
-		if deps.Vectors != nil {
-			interaction, err := deps.Store.GetInteraction(id)
-			if errors.Is(err, storage.ErrNotFound) {
-				httpError(w, http.StatusNotFound, "not_found", "interaction not found")
-				return
-			}
-			if err != nil {
-				httpError(w, http.StatusInternalServerError, "api_error", "failed to get interaction: %v", err)
-				return
-			}
-			deleteVectorIDs(deps.Vectors, interaction.VectorIDs)
-		}
-
-		err := deps.Store.DeleteInteraction(id)
+		interaction, err := deps.Store.GetInteraction(id)
 		if errors.Is(err, storage.ErrNotFound) {
 			httpError(w, http.StatusNotFound, "not_found", "interaction not found")
 			return
 		}
 		if err != nil {
+			httpError(w, http.StatusInternalServerError, "api_error", "failed to get interaction: %v", err)
+			return
+		}
+
+		if deps.Vectors != nil {
+			deleteVectorIDs(deps.Vectors, interaction.VectorIDs)
+		}
+
+		if err := deps.Store.DeleteInteraction(id); err != nil {
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to delete interaction: %v", err)
 			return
 		}
@@ -285,10 +281,13 @@ func handleDeleteInteraction(deps AppDeps) http.HandlerFunc {
 func deleteVectorIDs(vectors VectorDeleter, vectorIDsJSON string) {
 	var ids []string
 	if err := json.Unmarshal([]byte(vectorIDsJSON), &ids); err != nil {
+		slog.Warn("failed to parse vector_ids JSON", "raw", vectorIDsJSON, "error", err)
 		return
 	}
 	for _, vid := range ids {
-		_ = vectors.Delete("context_vectors", vid)
+		if err := vectors.Delete("context_vectors", vid); err != nil {
+			slog.Warn("failed to delete vector", "vector_id", vid, "error", err)
+		}
 	}
 }
 
@@ -316,28 +315,23 @@ func handleDeleteContextDoc(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 
-		// Fetch doc to get vector_id before deleting.
-		if deps.Vectors != nil {
-			doc, err := deps.Store.GetContextDoc(id)
-			if errors.Is(err, storage.ErrNotFound) {
-				httpError(w, http.StatusNotFound, "not_found", "context doc not found")
-				return
-			}
-			if err != nil {
-				httpError(w, http.StatusInternalServerError, "api_error", "failed to get context doc: %v", err)
-				return
-			}
-			if doc.VectorID != "" {
-				_ = deps.Vectors.Delete("context_vectors", doc.VectorID)
-			}
-		}
-
-		err := deps.Store.DeleteContextDoc(id)
+		doc, err := deps.Store.GetContextDoc(id)
 		if errors.Is(err, storage.ErrNotFound) {
 			httpError(w, http.StatusNotFound, "not_found", "context doc not found")
 			return
 		}
 		if err != nil {
+			httpError(w, http.StatusInternalServerError, "api_error", "failed to get context doc: %v", err)
+			return
+		}
+
+		if deps.Vectors != nil && doc.VectorID != "" {
+			if err := deps.Vectors.Delete("context_vectors", doc.VectorID); err != nil {
+				slog.Warn("failed to delete vector for context doc", "doc_id", id, "vector_id", doc.VectorID, "error", err)
+			}
+		}
+
+		if err := deps.Store.DeleteContextDoc(id); err != nil {
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to delete context doc: %v", err)
 			return
 		}
