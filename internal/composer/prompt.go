@@ -90,21 +90,21 @@ func (c *Composer) buildEnrichment(chunks []retrieval.ContextChunk, profileSumma
 	headerTokens := EstimateTokens(contextHeader)
 	remaining := c.MaxContextTokens - profileTokens - headerTokens
 
-	var selected []retrieval.ContextChunk
+	var selectedEntries []string
 	for _, ch := range sorted {
 		entry := formatChunk(ch)
 		tokens := EstimateTokens(entry)
 		if tokens > remaining {
 			continue
 		}
-		selected = append(selected, ch)
+		selectedEntries = append(selectedEntries, entry)
 		remaining -= tokens
 	}
 
-	if len(selected) > 0 {
+	if len(selectedEntries) > 0 {
 		sb.WriteString(contextHeader)
-		for _, ch := range selected {
-			sb.WriteString(formatChunk(ch))
+		for _, entry := range selectedEntries {
+			sb.WriteString(entry)
 		}
 	}
 

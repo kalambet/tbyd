@@ -257,14 +257,12 @@ func TestEstimateTokens(t *testing.T) {
 		input string
 		want  int
 	}{
-		{"hello world", 2},  // 11 chars → (11+3)/4 = 3... actually let me check
+		// "hello world" is 11 characters, so (11+3)/4 = 3 tokens.
+		{"hello world", 3},
 		{"", 0},
 		{"abcd", 1},
 		{"abcde", 2},
 	}
-	// Recalculate: "hello world" is 11 chars, (11+3)/4 = 3
-	// Fix test expectations.
-	tests[0].want = 3
 
 	for _, tt := range tests {
 		got := EstimateTokens(tt.input)
