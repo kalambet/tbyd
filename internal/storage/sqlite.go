@@ -494,3 +494,116 @@ func (s *Store) FailJob(id string, errMsg string) error {
 
 	return tx.Commit()
 }
+
+// --- Additional Methods ---
+
+func (s *Store) DeleteContextDoc(id string) error {
+	res, err := s.db.Exec(`DELETE FROM context_docs WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteInteraction(id string) error {
+	res, err := s.db.Exec(`DELETE FROM interactions WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListInteractions(limit, offset int) ([]Interaction, error) {
+	rows, err := s.db.Query(`
+		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids
+		FROM interactions ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Interaction
+	for rows.Next() {
+		var i Interaction
+		var createdAt string
+		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.Status, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		i.CreatedAt = t
+		results = append(results, i)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error) {
+	rows, err := s.db.Query(`
+		SELECT id, title, content, source, tags, created_at, vector_id
+		FROM context_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ContextDoc
+	for rows.Next() {
+		var d ContextDoc
+		var createdAt string
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		d.CreatedAt = t
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) UpdateContextDocVectorID(id, vectorID string) error {
+	res, err := s.db.Exec(`UPDATE context_docs SET vector_id = ? WHERE id = ?`, vectorID, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CountContextDocs() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM context_docs`).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CountInteractions() (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM interactions`).Scan(&count)
+	return count, err
+}
