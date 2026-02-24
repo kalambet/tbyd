@@ -164,10 +164,7 @@ func TestEnrich_FullPipeline(t *testing.T) {
 	}
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	enriched, meta, err := enricher.Enrich(context.Background(), makeReq("tell me about Go"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("tell me about Go"))
 
 	if !meta.IntentExtracted {
 		t.Error("expected IntentExtracted to be true")
@@ -215,10 +212,7 @@ func TestEnrich_IntentExtractorFails(t *testing.T) {
 	}
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	enriched, meta, err := enricher.Enrich(context.Background(), makeReq("test query"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("test query"))
 
 	if meta.IntentExtracted {
 		t.Error("expected IntentExtracted to be false when extractor fails")
@@ -255,10 +249,7 @@ func TestEnrich_RetrievalFails(t *testing.T) {
 	}
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	enriched, meta, err := enricher.Enrich(context.Background(), makeReq("test query"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("test query"))
 
 	if len(meta.ChunksUsed) != 0 {
 		t.Errorf("ChunksUsed = %d, want 0", len(meta.ChunksUsed))
@@ -296,10 +287,7 @@ func TestEnrich_ProfileEmpty(t *testing.T) {
 	ps := &mockProfileStore{} // empty
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	_, meta, err := enricher.Enrich(context.Background(), makeReq("do something"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	_, meta := enricher.Enrich(context.Background(), makeReq("do something"))
 
 	if !meta.IntentExtracted {
 		t.Error("expected IntentExtracted to be true")
@@ -329,10 +317,7 @@ func TestEnrich_MetadataPopulated(t *testing.T) {
 	ps := &mockProfileStore{}
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	_, meta, err := enricher.Enrich(context.Background(), makeReq("recall db schema"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	_, meta := enricher.Enrich(context.Background(), makeReq("recall db schema"))
 
 	if len(meta.ChunksUsed) != 2 {
 		t.Fatalf("ChunksUsed = %d, want 2", len(meta.ChunksUsed))
@@ -365,10 +350,7 @@ func TestEnrich_DurationTracked(t *testing.T) {
 	ps := &mockProfileStore{}
 
 	enricher := buildEnricher(chatter, eng, vs, ps)
-	_, meta, err := enricher.Enrich(context.Background(), makeReq("test"))
-	if err != nil {
-		t.Fatalf("Enrich returned error: %v", err)
-	}
+	_, meta := enricher.Enrich(context.Background(), makeReq("test"))
 
 	if meta.EnrichmentDurationMs < 50 {
 		t.Errorf("EnrichmentDurationMs = %d, want >= 50", meta.EnrichmentDurationMs)

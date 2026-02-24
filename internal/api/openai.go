@@ -70,17 +70,13 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.Ha
 
 		// Enrich if enricher is available.
 		if enricher != nil {
-			enriched, meta, err := enricher.Enrich(r.Context(), req)
-			if err != nil {
-				slog.Warn("enrichment failed, forwarding original request", "error", err)
-			} else {
-				req = enriched
-				slog.Debug("request enriched",
-					"intent_extracted", meta.IntentExtracted,
-					"chunks_used", len(meta.ChunksUsed),
-					"duration_ms", meta.EnrichmentDurationMs,
-				)
-			}
+			enriched, meta := enricher.Enrich(r.Context(), req)
+			req = enriched
+			slog.Debug("request enriched",
+				"intent_extracted", meta.IntentExtracted,
+				"chunks_used", len(meta.ChunksUsed),
+				"duration_ms", meta.EnrichmentDurationMs,
+			)
 		}
 
 		rc, err := p.Chat(r.Context(), req)

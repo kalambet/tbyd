@@ -59,9 +59,11 @@ func NewEnricher(
 //
 // On failure at any step, the pipeline degrades gracefully — the original
 // request is enriched with whatever context is available.
-func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (proxy.ChatRequest, EnrichmentMetadata, error) {
+func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy.ChatRequest, meta EnrichmentMetadata) {
 	start := time.Now()
-	meta := EnrichmentMetadata{}
+	defer func() {
+		meta.EnrichmentDurationMs = time.Since(start).Milliseconds()
+	}()
 
 	// 1. Extract intent from last user message.
 	lastUserMsg := extractLastUserMessage(req.Messages)
@@ -87,19 +89,17 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (proxy.Cha
 	enriched, err := e.composer.Compose(req, chunks, profileSummary)
 	if err != nil {
 		slog.Warn("enrichment: composition failed, forwarding original request", "error", err)
-		meta.EnrichmentDurationMs = time.Since(start).Milliseconds()
-		return req, meta, nil
+		out = req
+		return
 	}
-
-	meta.EnrichmentDurationMs = time.Since(start).Milliseconds()
 
 	slog.Debug("enrichment complete",
 		"intent_extracted", meta.IntentExtracted,
 		"chunks_used", len(meta.ChunksUsed),
-		"duration_ms", meta.EnrichmentDurationMs,
 	)
 
-	return enriched, meta, nil
+	out = enriched
+	return
 }
 
 // extractLastUserMessage finds the last message with role "user" in the
