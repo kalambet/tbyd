@@ -6,27 +6,27 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/kalambet/tbyd/internal/engine"
+	"github.com/kalambet/tbyd/internal/pipeline"
 	"github.com/kalambet/tbyd/internal/proxy"
 )
 
 const maxRequestBodySize = 1 << 20 // 1MB
 
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
-// REST API. The engine parameter is the local inference backend used for
-// enrichment (intent extraction, embedding). Passing nil disables enrichment
+// REST API. When enricher is non-nil, incoming chat requests are enriched
+// before forwarding to the cloud proxy. Passing nil disables enrichment
 // (passthrough mode).
-func NewOpenAIHandler(p *proxy.Client, eng engine.Engine) http.Handler {
-	_ = eng // will be used by enrichment pipeline (issue 1.7)
+func NewOpenAIHandler(p *proxy.Client, enricher *pipeline.Enricher) http.Handler {
 	r := chi.NewRouter()
 
 	r.Get("/health", handleHealth)
 	r.Get("/v1/models", handleModels(p))
-	r.Post("/v1/chat/completions", handleChatCompletions(p))
+	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher))
 
 	return r
 }
@@ -52,7 +52,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 	}
 }
 
-func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
+func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		defer r.Body.Close()
@@ -66,6 +66,17 @@ func handleChatCompletions(p *proxy.Client) http.HandlerFunc {
 		if !hasMessages(req.Messages) {
 			httpError(w, http.StatusBadRequest, "invalid_request_error", "messages is required and must not be empty")
 			return
+		}
+
+		// Enrich if enricher is available.
+		if enricher != nil {
+			enriched, meta := enricher.Enrich(r.Context(), req)
+			req = enriched
+			slog.Debug("request enriched",
+				"intent_extracted", meta.IntentExtracted,
+				"chunks_used", len(meta.ChunksUsed),
+				"duration_ms", meta.EnrichmentDurationMs,
+			)
 		}
 
 		rc, err := p.Chat(r.Context(), req)

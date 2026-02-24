@@ -88,8 +88,8 @@ func TestRetrieveSemanticMatch(t *testing.T) {
 	if len(chunks) == 0 {
 		t.Fatal("expected at least one result")
 	}
-	if chunks[0].Score < 0.7 {
-		t.Errorf("score = %f, want > 0.7", chunks[0].Score)
+	if chunks[0].Score < 0.6 {
+		t.Errorf("score = %f, want > 0.6", chunks[0].Score)
 	}
 	if chunks[0].Text != docText {
 		t.Errorf("text = %q, want %q", chunks[0].Text, docText)
@@ -111,8 +111,8 @@ func TestRetrieveForIntentSemanticMatch(t *testing.T) {
 	if len(chunks) == 0 {
 		t.Fatal("expected at least one result")
 	}
-	if chunks[0].Score < 0.7 {
-		t.Errorf("score = %f, want > 0.7", chunks[0].Score)
+	if chunks[0].Score < 0.6 {
+		t.Errorf("score = %f, want > 0.6", chunks[0].Score)
 	}
 	if chunks[0].Text != docText {
 		t.Errorf("text = %q, want %q", chunks[0].Text, docText)

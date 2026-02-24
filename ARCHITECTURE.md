@@ -717,7 +717,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.4** Context retrieval integration
 - [x] **1.5** User profile manager
 - [x] **1.6** Prompt composer (structured format)
-- [ ] **1.7** Enrichment pipeline orchestrator
+- [x] **1.7** Enrichment pipeline orchestrator
 
 ### Phase 2 — User Surfaces
 - [ ] **2.1** Universal ingestion HTTP API

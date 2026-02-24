@@ -68,6 +68,12 @@ func Open(dataDir string) (*Store, error) {
 	return s, nil
 }
 
+// DB returns the underlying *sql.DB for use by subsystems that need
+// direct database access (e.g. retrieval.SQLiteStore).
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()
