@@ -295,6 +295,52 @@ func TestListInteractions_Empty(t *testing.T) {
 	}
 }
 
+func TestGetInteraction(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	// Save an interaction directly.
+	interaction := storage.Interaction{
+		ID:        "int-get-1",
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		UserQuery: "What is Go?",
+		Status:    "completed",
+		VectorIDs: "[]",
+	}
+	if err := store.SaveInteraction(interaction); err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	// GET existing interaction.
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodGet, "/interactions/int-get-1", "", testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var got storage.Interaction
+	json.NewDecoder(rr.Body).Decode(&got)
+	if got.ID != "int-get-1" {
+		t.Errorf("ID = %q, want %q", got.ID, "int-get-1")
+	}
+	if got.UserQuery != "What is Go?" {
+		t.Errorf("UserQuery = %q, want %q", got.UserQuery, "What is Go?")
+	}
+}
+
+func TestGetInteraction_NotFound(t *testing.T) {
+	h, _ := setupAppHandler(t, testToken)
+
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodGet, "/interactions/nonexistent", "", testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
 func TestDeleteInteraction_NotFound(t *testing.T) {
 	h, _ := setupAppHandler(t, testToken)
 

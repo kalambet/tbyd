@@ -103,7 +103,8 @@ func run() error {
 		Store:      store,
 		Profile:    profileMgr,
 		Token:      apiToken,
-		HTTPClient: http.DefaultClient,
+		HTTPClient: &http.Client{Timeout: 15 * time.Second},
+		Vectors:    vectorStore,
 	})
 
 	// Compose top-level router: OpenAI-compat routes + management/ingest routes.

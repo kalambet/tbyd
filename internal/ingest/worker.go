@@ -62,7 +62,10 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		}
 
-		done, _ := w.RunOnce(ctx)
+		done, err := w.RunOnce(ctx)
+		if err != nil {
+			w.logger.Error("worker iteration failed", "error", err)
+		}
 		if done {
 			continue
 		}
@@ -88,7 +91,9 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 
 	if err := w.processJob(ctx, job); err != nil {
 		w.logger.Warn("job failed", "job_id", job.ID, "error", err)
-		_ = w.store.FailJob(job.ID, err.Error())
+		if failErr := w.store.FailJob(job.ID, err.Error()); failErr != nil {
+			w.logger.Error("failed to mark job as failed", "job_id", job.ID, "error", failErr)
+		}
 		return true, nil
 	}
 

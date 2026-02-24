@@ -30,11 +30,17 @@ type IngestRequest struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+// VectorDeleter abstracts vector store deletion for the API layer.
+type VectorDeleter interface {
+	Delete(table string, id string) error
+}
+
 type AppDeps struct {
 	Store      *storage.Store
 	Profile    *profile.Manager
 	Token      string
 	HTTPClient *http.Client
+	Vectors    VectorDeleter // optional; if nil, vector cleanup is skipped on delete
 }
 
 func NewAppHandler(deps AppDeps) http.Handler {
@@ -94,6 +100,11 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 			}
 			defer resp.Body.Close()
 
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				httpError(w, http.StatusBadGateway, "api_error", "url returned status %d", resp.StatusCode)
+				return
+			}
+
 			body, err := io.ReadAll(io.LimitReader(resp.Body, maxURLFetchSize))
 			if err != nil {
 				httpError(w, http.StatusBadGateway, "api_error", "failed to read url response: %v", err)
@@ -120,7 +131,11 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 
 		tagsJSON := "[]"
 		if req.Tags != nil {
-			b, _ := json.Marshal(req.Tags)
+			b, err := json.Marshal(req.Tags)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "api_error", "failed to marshal tags: %v", err)
+				return
+			}
 			tagsJSON = string(b)
 		}
 
@@ -137,7 +152,11 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
-		payload, _ := json.Marshal(map[string]string{"context_doc_id": docID})
+		payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "api_error", "failed to create job payload: %v", err)
+			return
+		}
 		job := storage.Job{
 			ID:          uuid.New().String(),
 			Type:        "ingest_enrich",
@@ -171,6 +190,7 @@ func handleGetProfile(deps AppDeps) http.HandlerFunc {
 
 func handlePatchProfile(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		var fields map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 			httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid request body: %v", err)
@@ -232,6 +252,20 @@ func handleDeleteInteraction(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
 
+		// Clean up vectors if VectorStore is available.
+		if deps.Vectors != nil {
+			interaction, err := deps.Store.GetInteraction(id)
+			if errors.Is(err, storage.ErrNotFound) {
+				httpError(w, http.StatusNotFound, "not_found", "interaction not found")
+				return
+			}
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "api_error", "failed to get interaction: %v", err)
+				return
+			}
+			deleteVectorIDs(deps.Vectors, interaction.VectorIDs)
+		}
+
 		err := deps.Store.DeleteInteraction(id)
 		if errors.Is(err, storage.ErrNotFound) {
 			httpError(w, http.StatusNotFound, "not_found", "interaction not found")
@@ -244,6 +278,17 @@ func handleDeleteInteraction(deps AppDeps) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	}
+}
+
+// deleteVectorIDs parses a JSON array of vector IDs and deletes each from the vector store.
+func deleteVectorIDs(vectors VectorDeleter, vectorIDsJSON string) {
+	var ids []string
+	if err := json.Unmarshal([]byte(vectorIDsJSON), &ids); err != nil {
+		return
+	}
+	for _, vid := range ids {
+		_ = vectors.Delete("context_vectors", vid)
 	}
 }
 
@@ -270,6 +315,22 @@ func handleListContextDocs(deps AppDeps) http.HandlerFunc {
 func handleDeleteContextDoc(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+
+		// Fetch doc to get vector_id before deleting.
+		if deps.Vectors != nil {
+			doc, err := deps.Store.GetContextDoc(id)
+			if errors.Is(err, storage.ErrNotFound) {
+				httpError(w, http.StatusNotFound, "not_found", "context doc not found")
+				return
+			}
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "api_error", "failed to get context doc: %v", err)
+				return
+			}
+			if doc.VectorID != "" {
+				_ = deps.Vectors.Delete("context_vectors", doc.VectorID)
+			}
+		}
 
 		err := deps.Store.DeleteContextDoc(id)
 		if errors.Is(err, storage.ErrNotFound) {
