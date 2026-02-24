@@ -715,8 +715,8 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.2** Intent extraction via local LLM (phi3.5)
 - [x] **1.3** Local engine abstraction (backend-agnostic inference)
 - [x] **1.4** Context retrieval integration
-- [ ] **1.5** User profile manager
-- [ ] **1.6** Prompt composer (structured format)
+- [x] **1.5** User profile manager
+- [x] **1.6** Prompt composer (structured format)
 - [ ] **1.7** Enrichment pipeline orchestrator
 
 ### Phase 2 — User Surfaces
