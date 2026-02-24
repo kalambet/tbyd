@@ -12,6 +12,8 @@ import (
 
 const defaultMaxContextTokens = 4000
 
+const systemMessageSeparator = "\n\n---\n\n"
+
 // Composer assembles enriched prompts from user profile, retrieved context
 // chunks, and the original user query. It produces a ChatRequest ready for
 // the cloud proxy.
@@ -45,7 +47,7 @@ func (c *Composer) Compose(req proxy.ChatRequest, chunks []retrieval.ContextChun
 
 	if len(msgs) > 0 && getRole(msgs[0]) == "system" {
 		existing := getContent(msgs[0])
-		merged := enrichment + "\n\n---\n\n" + existing
+		merged := enrichment + systemMessageSeparator + existing
 		setContent(msgs[0], merged)
 	} else {
 		sys := makeSystemMessage(enrichment)
