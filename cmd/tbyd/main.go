@@ -11,10 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/kalambet/tbyd/internal/api"
 	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/config"
 	"github.com/kalambet/tbyd/internal/engine"
+	"github.com/kalambet/tbyd/internal/ingest"
 	"github.com/kalambet/tbyd/internal/intent"
 	"github.com/kalambet/tbyd/internal/pipeline"
 	"github.com/kalambet/tbyd/internal/profile"
@@ -87,15 +90,36 @@ func run() error {
 	comp := composer.New(0) // default 4000 tokens
 	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, cfg.Retrieval.TopK)
 
+	// Retrieve API token for bearer auth on management endpoints.
+	apiToken, err := config.GetAPIToken(config.NewKeychain())
+	if err != nil {
+		return fmt.Errorf("getting API token: %w", err)
+	}
+
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	handler := api.NewOpenAIHandler(proxyClient, enricher)
+	openaiHandler := api.NewOpenAIHandler(proxyClient, enricher)
+	appHandler := api.NewAppHandler(api.AppDeps{
+		Store:      store,
+		Profile:    profileMgr,
+		Token:      apiToken,
+		HTTPClient: http.DefaultClient,
+	})
+
+	// Compose top-level router: OpenAI-compat routes + management/ingest routes.
+	topRouter := chi.NewRouter()
+	topRouter.Mount("/", openaiHandler)
+	topRouter.Mount("/", appHandler)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: handler,
+		Handler: topRouter,
 	}
+
+	// Start ingest worker.
+	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
+	go worker.Run(ctx)
 
 	// Start server in a goroutine.
 	errCh := make(chan error, 1)
