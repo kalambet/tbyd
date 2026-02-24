@@ -12,9 +12,14 @@ import (
 	"time"
 
 	"github.com/kalambet/tbyd/internal/api"
+	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/config"
 	"github.com/kalambet/tbyd/internal/engine"
+	"github.com/kalambet/tbyd/internal/intent"
+	"github.com/kalambet/tbyd/internal/pipeline"
+	"github.com/kalambet/tbyd/internal/profile"
 	"github.com/kalambet/tbyd/internal/proxy"
+	"github.com/kalambet/tbyd/internal/retrieval"
 	"github.com/kalambet/tbyd/internal/storage"
 )
 
@@ -72,9 +77,19 @@ func run() error {
 		}
 	}()
 
+	// Build enrichment pipeline.
+	ollamaEngine := eng // engine.Engine backed by Ollama
+	extractor := intent.NewExtractor(engine.ChatAdapter(ollamaEngine), cfg.Ollama.FastModel)
+	embedder := retrieval.NewEmbedder(ollamaEngine, cfg.Ollama.EmbedModel)
+	vectorStore := retrieval.NewSQLiteStore(store.DB())
+	retriever := retrieval.NewRetriever(embedder, vectorStore)
+	profileMgr := profile.NewManager(store)
+	comp := composer.New(0) // default 4000 tokens
+	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, cfg.Retrieval.TopK)
+
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	handler := api.NewOpenAIHandler(proxyClient, eng)
+	handler := api.NewOpenAIHandler(proxyClient, enricher)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
 	srv := &http.Server{
