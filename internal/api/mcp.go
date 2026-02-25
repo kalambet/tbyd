@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -149,7 +150,10 @@ func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {
 		docID := uuid.New().String()
 		tagsJSON := "[]"
 		if len(tags) > 0 {
-			b, _ := json.Marshal(tags)
+			b, err := json.Marshal(tags)
+			if err != nil {
+				return mcpError(fmt.Sprintf("failed to marshal tags: %v", err)), nil
+			}
 			tagsJSON = string(b)
 		}
 
@@ -166,7 +170,10 @@ func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {
 		}
 
 		// Enqueue enrichment job.
-		payload, _ := json.Marshal(map[string]string{"context_doc_id": docID})
+		payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
+		if err != nil {
+			return mcpError(fmt.Sprintf("failed to marshal enrichment payload: %v", err)), nil
+		}
 		job := storage.Job{
 			ID:          uuid.New().String(),
 			Type:        "ingest_enrich",
@@ -307,13 +314,18 @@ func mcpSummarizeSession(deps MCPDeps) server.ToolHandlerFunc {
 		}
 
 		// Enqueue for embedding.
-		payload, _ := json.Marshal(map[string]string{"context_doc_id": docID})
+		payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
+		if err != nil {
+			return mcpError(fmt.Sprintf("failed to marshal enrichment payload: %v", err)), nil
+		}
 		job := storage.Job{
 			ID:          uuid.New().String(),
 			Type:        "ingest_enrich",
 			PayloadJSON: string(payload),
 		}
-		_ = deps.Store.EnqueueJob(job)
+		if err := deps.Store.EnqueueJob(job); err != nil {
+			return mcpError(fmt.Sprintf("summary saved but failed to queue enrichment: %v", err)), nil
+		}
 
 		return mcpText(summary), nil
 	}
@@ -357,8 +369,9 @@ func mcpResourceRecent(deps MCPDeps) server.ResourceHandlerFunc {
 		summaries := make([]interactionSummary, len(interactions))
 		for i, ix := range interactions {
 			query := ix.UserQuery
-			if len(query) > 200 {
-				query = query[:200] + "..."
+			if utf8.RuneCountInString(query) > 200 {
+				runes := []rune(query)
+				query = string(runes[:200]) + "..."
 			}
 			summaries[i] = interactionSummary{
 				ID:        ix.ID,

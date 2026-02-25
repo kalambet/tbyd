@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/kalambet/tbyd/internal/profile"
@@ -143,8 +146,14 @@ func TestMCPTool_AddContext(t *testing.T) {
 	}
 
 	text := toolText(t, result)
-	if len(text) < 20 {
-		t.Fatalf("expected doc ID in response, got: %s", text)
+	// Response is "Stored context doc <uuid>"; extract and validate UUID.
+	const prefix = "Stored context doc "
+	if !strings.HasPrefix(text, prefix) {
+		t.Fatalf("expected response starting with %q, got: %s", prefix, text)
+	}
+	docIDStr := strings.TrimPrefix(text, prefix)
+	if _, err := uuid.Parse(docIDStr); err != nil {
+		t.Fatalf("expected valid UUID in response, got %q: %v", docIDStr, err)
 	}
 
 	// Verify doc was saved.
@@ -294,6 +303,7 @@ func TestMCPServer_ConcurrentCalls(t *testing.T) {
 	recallHandler := mcpRecall(deps)
 
 	var wg sync.WaitGroup
+	var successCount atomic.Int32
 	errs := make(chan error, 20)
 
 	for i := 0; i < 5; i++ {
@@ -303,10 +313,16 @@ func TestMCPServer_ConcurrentCalls(t *testing.T) {
 			req := makeCallToolRequest("add_context", map[string]interface{}{
 				"content": "concurrent content",
 			})
-			_, err := addHandler(context.Background(), req)
+			result, err := addHandler(context.Background(), req)
 			if err != nil {
 				errs <- err
+				return
 			}
+			if result.IsError {
+				errs <- errors.New("add_context returned error: " + toolText(t, result))
+				return
+			}
+			successCount.Add(1)
 		}(i)
 	}
 
@@ -317,10 +333,16 @@ func TestMCPServer_ConcurrentCalls(t *testing.T) {
 			req := makeCallToolRequest("recall", map[string]interface{}{
 				"query": "test",
 			})
-			_, err := recallHandler(context.Background(), req)
+			result, err := recallHandler(context.Background(), req)
 			if err != nil {
 				errs <- err
+				return
 			}
+			if result.IsError {
+				errs <- errors.New("recall returned error: " + toolText(t, result))
+				return
+			}
+			successCount.Add(1)
 		}(i)
 	}
 
@@ -329,6 +351,10 @@ func TestMCPServer_ConcurrentCalls(t *testing.T) {
 
 	for err := range errs {
 		t.Fatalf("concurrent call failed: %v", err)
+	}
+
+	if got := successCount.Load(); got != 10 {
+		t.Fatalf("expected 10 successful completions, got %d", got)
 	}
 }
 
@@ -341,7 +367,10 @@ func TestMCPTool_SummarizeSession(t *testing.T) {
 		{"role": "user", "content": "I prefer Go for backend"},
 		{"role": "assistant", "content": "Noted! Go is excellent for backend services."},
 	}
-	messagesJSON, _ := json.Marshal(messages)
+	messagesJSON, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatalf("marshaling messages: %v", err)
+	}
 
 	req := makeCallToolRequest("summarize_session", map[string]interface{}{
 		"messages": string(messagesJSON),

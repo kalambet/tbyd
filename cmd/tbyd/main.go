@@ -38,7 +38,7 @@ func main() {
 }
 
 func run() error {
-	fmt.Fprintf(os.Stdout, "tbyd version %s\n", version)
+	fmt.Fprintf(os.Stderr, "tbyd version %s\n", version)
 
 	// Load config.
 	cfg, err := config.Load()
@@ -67,7 +67,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("detecting inference engine: %w", err)
 	}
-	if err := engine.EnsureReady(ctx, eng, cfg.Ollama.FastModel, cfg.Ollama.EmbedModel, os.Stdout); err != nil {
+	if err := engine.EnsureReady(ctx, eng, cfg.Ollama.FastModel, cfg.Ollama.EmbedModel, os.Stderr); err != nil {
 		return err
 	}
 
@@ -152,7 +152,7 @@ func run() error {
 	// Start server in a goroutine.
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(os.Stdout, "tbyd listening on %s\n", addr)
+		fmt.Fprintf(os.Stderr, "tbyd listening on %s\n", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -162,7 +162,7 @@ func run() error {
 	// Wait for signal or server error.
 	select {
 	case <-ctx.Done():
-		fmt.Fprintln(os.Stdout, "shutting down...")
+		fmt.Fprintln(os.Stderr, "shutting down...")
 	case err := <-errCh:
 		if err != nil {
 			return fmt.Errorf("server error: %w", err)
