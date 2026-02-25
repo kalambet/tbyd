@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -143,7 +144,7 @@ func run() error {
 	})
 	stdioSrv := server.NewStdioServer(mcpSrv)
 	go func() {
-		if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil {
+		if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("MCP stdio server error", "error", err)
 		}
 	}()
