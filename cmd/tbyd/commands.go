@@ -284,8 +284,11 @@ var recallCmd = &cobra.Command{
 
 		for i, r := range results {
 			fmt.Printf("\n%s [score: %.3f]\n", colorize(colorBold, fmt.Sprintf("Result %d", i+1)), r.Score)
-			if r.Tags != "" && r.Tags != "[]" {
-				fmt.Printf("  Tags: %s\n", r.Tags)
+			var tags []string
+			if r.Tags != "" {
+				if json.Unmarshal([]byte(r.Tags), &tags) == nil && len(tags) > 0 {
+					fmt.Printf("  Tags: %s\n", strings.Join(tags, ", "))
+				}
 			}
 			text := r.Text
 			if len(text) > 500 {

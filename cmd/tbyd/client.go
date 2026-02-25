@@ -18,7 +18,7 @@ type apiClient struct {
 	httpClient *http.Client
 }
 
-func newAPIClient() (*apiClient, error) {
+var newAPIClient = func() (*apiClient, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)

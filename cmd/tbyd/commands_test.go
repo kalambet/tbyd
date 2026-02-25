@@ -71,30 +71,14 @@ func TestIngestCommand_Text(t *testing.T) {
 		"POST /ingest": `{"id":"doc-123","status":"queued"}`,
 	})
 
-	client := ts.client()
+	original := newAPIClient
+	newAPIClient = func() (*apiClient, error) { return ts.client(), nil }
+	t.Cleanup(func() { newAPIClient = original })
 
-	req := map[string]any{
-		"source":  "cli",
-		"type":    "text",
-		"content": "hello world",
-		"tags":    []string{"foo"},
-	}
-
-	resp, err := client.post(ctx, "/ingest", req)
-	if err != nil {
+	defer rootCmd.SetArgs(nil)
+	rootCmd.SetArgs([]string{"ingest", "--text", "hello world", "--tags", "foo"})
+	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var result map[string]string
-	if err := decodeJSON(resp, &result); err != nil {
-		t.Fatalf("decode error: %v", err)
-	}
-
-	if result["status"] != "queued" {
-		t.Errorf("status = %q, want %q", result["status"], "queued")
-	}
-	if result["id"] != "doc-123" {
-		t.Errorf("id = %q, want %q", result["id"], "doc-123")
 	}
 
 	if len(ts.requests) != 1 {
@@ -121,6 +105,10 @@ func TestIngestCommand_Text(t *testing.T) {
 	}
 	if body["content"] != "hello world" {
 		t.Errorf("body.content = %v, want hello world", body["content"])
+	}
+	tags, ok := body["tags"].([]interface{})
+	if !ok || len(tags) != 1 || tags[0] != "foo" {
+		t.Errorf("body.tags = %v, want [foo]", body["tags"])
 	}
 }
 
