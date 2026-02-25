@@ -721,7 +721,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 
 ### Phase 2 — User Surfaces
 - [ ] **2.1** Universal ingestion HTTP API
-- [ ] **2.2** MCP server (`add_context`, `recall`, `set_preference`, `summarize_session`)
+- [x] **2.2** MCP server (`add_context`, `recall`, `set_preference`, `summarize_session`)
 - [ ] **2.3** CLI interface (`tbyd ingest`, `tbyd status`, `tbyd profile`, `tbyd recall`)
 - [ ] **2.4** Interaction storage (opt-in)
 - [ ] **2.5** macOS SwiftUI menubar app

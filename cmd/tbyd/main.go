@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/mark3labs/mcp-go/server"
+
 	"github.com/kalambet/tbyd/internal/api"
 	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/config"
@@ -121,6 +123,31 @@ func run() error {
 	// Start ingest worker.
 	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
 	go worker.Run(ctx)
+
+	// Build and start MCP server (stdio transport in a goroutine).
+	mcpEngine := &api.EngineAdapter{
+		ChatFn: func(chatCtx context.Context, model string, messages []api.MCPMessage, _ *api.MCPSchema) (string, error) {
+			engineMsgs := make([]engine.Message, len(messages))
+			for i, m := range messages {
+				engineMsgs[i] = engine.Message{Role: m.Role, Content: m.Content}
+			}
+			return eng.Chat(chatCtx, model, engineMsgs, nil)
+		},
+	}
+	mcpSrv := api.NewMCPServer(api.MCPDeps{
+		Store:     store,
+		Profile:   profileMgr,
+		Retriever: retriever,
+		Engine:    mcpEngine,
+		DeepModel: cfg.Ollama.DeepModel,
+	})
+	stdioSrv := server.NewStdioServer(mcpSrv)
+	go func() {
+		if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil {
+			slog.Error("MCP stdio server error", "error", err)
+		}
+	}()
+	slog.Info("MCP server started (stdio transport)")
 
 	// Start server in a goroutine.
 	errCh := make(chan error, 1)
