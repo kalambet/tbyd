@@ -41,7 +41,12 @@ TBYD (working title) is a **local-first data sovereignty layer** that sits betwe
 │                        │                     │                   │
 │          ┌─────────────▼──────────────┐      │                   │
 │          │   CONTEXT RETRIEVER        │◄─────┘                   │
-│          │   (VectorStore search)     │                          │
+│          │   (hybrid: vector + BM25)  │                          │
+│          └─────────────┬──────────────┘                          │
+│                        │                                         │
+│          ┌─────────────▼──────────────┐                          │
+│          │   RERANKER                 │                          │
+│          │   (cross-encoder / LLM)    │                          │
 │          └─────────────┬──────────────┘                          │
 │                        │                                         │
 │          ┌─────────────▼──────────────┐                          │
@@ -89,7 +94,9 @@ cmd/tbyd/          ← main entrypoint, CLI flags
 internal/api/      ← OpenAI-compat REST server + MCP server
 internal/pipeline/ ← enrichment orchestration
 internal/intent/   ← intent extraction (calls local LLM)
-internal/retrieval/ ← VectorStore context retrieval
+internal/retrieval/ ← VectorStore context retrieval (hybrid: vector + BM25)
+internal/reranking/ ← retrieval reranking (cross-encoder / LLM-based)
+internal/cache/    ← query-level caching (exact + semantic)
 internal/composer/ ← prompt composition logic
 internal/storage/  ← SQLite wrappers (data + vectors)
 internal/proxy/    ← cloud LLM HTTP client (OpenRouter)
@@ -140,41 +147,64 @@ User Query
     - local_only (future): route to local Ollama, no cloud call
     │
     ▼
-[2. Intent Extraction] — local LLM call
-    Input:  user query + recent conversation history
-    Output: JSON { intent_type, entities, topics, context_needs[] }
-    Model:  Phi-3.5-mini via Ollama
-    Format: JSON schema with constrained output
+[2. Cache Check] — query-level cache
+    Level 1: exact-match (SHA256 of normalized query)
+    Level 2: semantic (cosine similarity on query embedding, threshold ≥ 0.92)
+    On hit: return cached enrichment, skip steps 3–6
+    On miss: continue pipeline
     │
     ▼
-[3. Context Retrieval] — VectorStore
-    Semantic search on entity + topic embeddings
+[3. Intent Extraction] — local LLM call
+    Input:  user query + recent conversation history
+    Output: JSON { intent_type, entities, topics, context_needs[],
+                   search_strategy, hybrid_ratio, suggested_top_k }
+    Model:  Phi-3.5-mini via Ollama
+    Format: JSON schema with constrained output
+    Search strategy output drives retrieval behavior:
+    - search_strategy: "vector_only" | "hybrid" | "keyword_heavy"
+    - hybrid_ratio: float (0.0 = all keyword, 1.0 = all vector)
+    - suggested_top_k: int (default 5, higher for broad queries)
+    │
+    ▼
+[4. Context Retrieval] — Hybrid Search (Vector + BM25)
+    Vector search: semantic search on entity + topic embeddings (cosine similarity)
+    Keyword search: BM25 via SQLite FTS5 on text_chunk content
+    Blend: weighted combination based on intent's hybrid_ratio
+    Score normalization: min-max on each signal before blending
     Returns: top-K relevant documents/interactions
     Sources: past interactions, user-uploaded docs, manual notes
     │
     ▼
-[4. Profile Injection]
+[5. Reranking] — cross-encoder or LLM-based
+    Re-score top-K chunks against the original query
+    Methods: LLM reranker (phi3.5) or cross-encoder model
+    Drops chunks below relevance threshold
+    Graceful degradation: on failure, use original ranking
+    │
+    ▼
+[6. Profile Injection]
     Append user preference summary from profile store
     (tone, detail level, domain expertise, recurring preferences)
     │
     ▼
-[5. Prompt Composition]
+[7. Prompt Composition]
     Compose enriched prompt:
     - System section: user profile summary (compressed JSON)
-    - Context section: retrieved relevant past data
+    - Context section: retrieved + reranked relevant past data
     - Query section: original user query (unmodified)
     Use OpenRouter's function calling / structured output when available
     │
     ▼
-[6. Cloud Dispatch] — OpenRouter HTTP client
+[8. Cloud Dispatch] — OpenRouter HTTP client
     POST enriched prompt to configured cloud model
     Stream response back to caller
     │
     ▼
-[7. Storage] — async, non-blocking
+[9. Storage + Cache Update] — async, non-blocking
     Store: original query, enriched prompt, response, timestamp
     Update: embeddings for retrieval, interaction count, topics
     Queue: preference update if user provides feedback
+    Cache: store enrichment result for future cache hits
 ```
 
 ### 4. Local LLM — Ollama + Dual-Model Strategy
@@ -209,6 +239,7 @@ Given the expanded scope of local processing (real-time intent extraction AND ba
 
 **Model assignment by task:**
 - Intent extraction → fast model
+- Retrieval reranking → fast model (optional, adds ~0.5–1s latency)
 - Ingestion enrichment (document tagging, key point extraction) → deep model (async)
 - Nightly profile synthesis → deep model
 - Session summarization → deep model (triggered post-session)
@@ -250,8 +281,10 @@ context_docs (
 )
 ```
 
-**Vector Store (SQLite brute-force, upgradeable to LanceDB)**
+**Vector Store (SQLite brute-force + FTS5, upgradeable to LanceDB)**
 - Embeddings stored as BLOBs in SQLite `context_vectors` table with brute-force cosine similarity search in Go
+- Full-text search via SQLite FTS5 virtual table on `text_chunk` for BM25 keyword scoring
+- Hybrid retrieval blends vector similarity + BM25 keyword scores with query-adaptive weighting
 - Sufficient for ~50–100K vectors with query latency under 250ms on Apple Silicon
 - All access goes through a `VectorStore` interface — backend is swappable without changing retrieval logic
 - Embedding model: `nomic-embed-text` via Ollama (768 dimensions, runs locally)
@@ -318,6 +351,81 @@ Profile schema:
 - Raw API keys (stored in platform secret store: macOS Keychain / Linux env vars)
 - Session data from other apps
 - Data from intercepted traffic beyond what user explicitly routes through TBYD
+
+---
+
+## Retrieval Quality
+
+### Hybrid Search (Vector + BM25)
+
+The context retrieval pipeline uses a **hybrid search** strategy combining vector similarity and keyword matching, with query-adaptive blending controlled by the intent extractor.
+
+**Vector search (semantic):** Cosine similarity over `nomic-embed-text` embeddings. Strong for conceptual/semantic queries where exact terms may not appear in the document.
+
+**Keyword search (BM25):** SQLite FTS5 virtual table over `context_vectors.text_chunk`. Strong for entity names, technical terms, exact phrases, and proper nouns that embed poorly.
+
+**Blending strategy:**
+- The intent extractor outputs a `search_strategy` and `hybrid_ratio` alongside the standard intent fields
+- Entity-heavy queries (e.g., "find docs about Kubernetes rate limiting") → keyword-heavy blend (ratio ~0.3 vector / 0.7 keyword)
+- Conceptual queries (e.g., "how should I approach testing?") → vector-heavy blend (ratio ~0.8 vector / 0.2 keyword)
+- Default: 0.7 vector / 0.3 keyword when intent extraction fails or doesn't specify
+- Scores are min-max normalized independently before blending to account for different scales
+
+**FTS5 schema:**
+```sql
+CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+    text_chunk,
+    content='context_vectors',
+    content_rowid='rowid'
+);
+```
+
+### Reranking
+
+After hybrid retrieval returns top-K candidates, a **reranking step** re-scores each chunk against the original query for more precise relevance ordering before prompt composition.
+
+**Architecture:**
+```go
+type Reranker interface {
+    Rerank(ctx context.Context, query string, chunks []ContextChunk) ([]ContextChunk, error)
+}
+```
+
+**Implementations:**
+- `LLMReranker` — uses the fast local model (phi3.5) to score each (query, chunk) pair on a 0–1 relevance scale. Adds ~0.5–1s latency for 5–10 chunks.
+- `NoOpReranker` — passthrough, returns chunks in original order. Used when reranking is disabled.
+
+**Behavior:**
+- Chunks below a configurable relevance threshold (default: 0.3) are dropped
+- On timeout or error, gracefully degrades to original ranking
+- Config: `enrichment.reranking_enabled` (default: true)
+
+### Query Cache
+
+A **two-level cache** avoids redundant enrichment for repeated or similar queries.
+
+**Level 1 — Exact match:**
+- Key: SHA256 of normalized query (lowercased, whitespace-collapsed)
+- Storage: in-memory map with TTL (default: 5 minutes)
+- Hit rate: catches identical repeated queries
+
+**Level 2 — Semantic match:**
+- Key: query embedding vector
+- Lookup: cosine similarity against cached query embeddings
+- Threshold: ≥ 0.92 similarity = cache hit
+- Storage: in-memory with TTL (default: 30 minutes)
+- Hit rate: catches rephrased queries ("what's the schema?" ≈ "tell me about the database schema")
+
+**Invalidation:**
+- Profile update → invalidate all cached entries (profile changes affect enrichment)
+- New context document ingested → invalidate all cached entries (new context may be relevant)
+- TTL expiry → automatic eviction
+
+**Config:**
+- `enrichment.cache_enabled` (default: true)
+- `enrichment.cache_semantic_threshold` (default: 0.92)
+- `enrichment.cache_exact_ttl` (default: "5m")
+- `enrichment.cache_semantic_ttl` (default: "30m")
 
 ---
 
@@ -718,6 +826,9 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.5** User profile manager
 - [x] **1.6** Prompt composer (structured format)
 - [x] **1.7** Enrichment pipeline orchestrator
+- [ ] **1.8** Hybrid retrieval (BM25 + vector search with adaptive blending)
+- [ ] **1.9** Retrieval reranking (cross-encoder / LLM-based)
+- [ ] **1.10** Query-level caching (exact + semantic)
 
 ### Phase 2 — User Surfaces
 - [ ] **2.1** Universal ingestion HTTP API
@@ -768,10 +879,14 @@ tbyd/
 │   ├── intent/
 │   │   └── extractor.go     ← Local LLM intent extraction
 │   ├── retrieval/
-│   │   ├── vectorstore.go   ← VectorStore interface
-│   │   ├── store.go         ← SQLite brute-force implementation
+│   │   ├── vectorstore.go   ← VectorStore interface (Search + SearchHybrid)
+│   │   ├── store.go         ← SQLite brute-force + FTS5 implementation
 │   │   ├── embedder.go      ← Ollama embedding client
-│   │   └── retriever.go     ← Semantic search orchestration
+│   │   └── retriever.go     ← Hybrid search orchestration
+│   ├── reranking/
+│   │   └── reranker.go      ← Reranker interface + LLM/NoOp implementations
+│   ├── cache/
+│   │   └── query.go         ← Two-level query cache (exact + semantic)
 │   ├── composer/
 │   │   └── prompt.go        ← Prompt composition
 │   ├── ingest/
@@ -833,7 +948,24 @@ After implementation, test end-to-end:
    - Add context via MCP `add_context` tool
    - Send related query → inspect enriched prompt in interaction log → verify context was injected
 
-3. **Claude Code MCP test:**
+3. **Hybrid retrieval test:**
+   - Add a context document with a specific entity name (e.g., "Kubernetes")
+   - Query using exact entity name → verify BM25 keyword search contributes to retrieval
+   - Query using semantic paraphrase → verify vector search contributes to retrieval
+   - Compare results: hybrid should outperform either signal alone for entity-heavy queries
+
+4. **Reranking test:**
+   - Add 10+ context documents with varying relevance
+   - Query with reranking enabled → verify top chunks are more relevant than cosine-only ordering
+   - Kill or timeout reranker → verify graceful degradation to original ranking
+
+5. **Query cache test:**
+   - Send identical query twice → verify second request returns faster (cache hit)
+   - Send semantically similar query → verify semantic cache hit
+   - Add new context document → verify cache is invalidated on next query
+   - Update profile → verify cache is invalidated
+
+6. **Claude Code MCP test:**
    - Register TBYD as MCP server in Claude Code settings
    - Use `recall` tool → verify it returns relevant stored context
 

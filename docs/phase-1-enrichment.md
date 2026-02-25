@@ -331,15 +331,267 @@
 
 ---
 
+## Issue 1.8 — Hybrid retrieval (BM25 + vector search with adaptive blending)
+
+**Context:** The current retrieval pipeline uses vector-only search (cosine similarity on embeddings). This works well for semantic/conceptual queries but underperforms for entity-heavy queries where exact keyword matches are more reliable. Combining BM25 keyword scoring (via SQLite FTS5) with vector similarity provides better recall across query types. The intent extractor drives the blend ratio based on query classification.
+
+**Tasks:**
+- Add SQLite FTS5 virtual table for keyword search:
+  - Create migration `XXX_add_fts5.sql`:
+    ```sql
+    CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+        text_chunk,
+        content='context_vectors',
+        content_rowid='rowid'
+    );
+    -- Triggers to keep FTS index in sync with context_vectors
+    CREATE TRIGGER context_vectors_ai AFTER INSERT ON context_vectors BEGIN
+        INSERT INTO context_vectors_fts(rowid, text_chunk) VALUES (new.rowid, new.text_chunk);
+    END;
+    CREATE TRIGGER context_vectors_ad AFTER DELETE ON context_vectors BEGIN
+        INSERT INTO context_vectors_fts(context_vectors_fts, rowid, text_chunk) VALUES('delete', old.rowid, old.text_chunk);
+    END;
+    CREATE TRIGGER context_vectors_au AFTER UPDATE ON context_vectors BEGIN
+        INSERT INTO context_vectors_fts(context_vectors_fts, rowid, text_chunk) VALUES('delete', old.rowid, old.text_chunk);
+        INSERT INTO context_vectors_fts(rowid, text_chunk) VALUES (new.rowid, new.text_chunk);
+    END;
+    ```
+  - Backfill: migration populates FTS from existing `context_vectors` rows
+- Extend `VectorStore` interface in `internal/retrieval/vectorstore.go`:
+  ```go
+  SearchKeyword(table string, query string, topK int) ([]ScoredRecord, error)
+  SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32) ([]ScoredRecord, error)
+  ```
+- Implement `SearchKeyword` on `SQLiteStore`:
+  - Query FTS5: `SELECT rowid, rank FROM context_vectors_fts WHERE text_chunk MATCH ? ORDER BY rank LIMIT ?`
+  - Fetch full records by rowid
+  - Normalize BM25 scores to 0–1 range (min-max normalization)
+- Implement `SearchHybrid` on `SQLiteStore`:
+  - Run vector search and keyword search in parallel (goroutines)
+  - Normalize scores independently (min-max on each signal)
+  - Blend: `final_score = vectorWeight * vector_score + (1 - vectorWeight) * keyword_score`
+  - Deduplicate by record ID, keep highest blended score
+  - Return top-K sorted by blended score
+- Extend `Intent` struct in `internal/intent/extractor.go`:
+  ```go
+  type Intent struct {
+      IntentType     string   // "recall", "task", "question", "preference_update"
+      Entities       []string
+      Topics         []string
+      ContextNeeds   []string
+      IsPrivate      bool
+      SearchStrategy string   // "vector_only", "hybrid", "keyword_heavy"
+      HybridRatio    float64  // 0.0 = all keyword, 1.0 = all vector (default 0.7)
+      SuggestedTopK  int      // 0 = use default (5)
+  }
+  ```
+- Update intent extraction prompt in `internal/intent/prompt.go` to include new output fields
+- Update `Retriever.RetrieveForIntent()` to use hybrid search:
+  - Read `SearchStrategy` and `HybridRatio` from intent
+  - If "vector_only" or intent extraction failed: use existing `Search()` (no change)
+  - If "hybrid" or "keyword_heavy": use `SearchHybrid()` with intent's ratio
+  - Use `SuggestedTopK` if non-zero, else default topK
+
+**Unit tests** (`internal/retrieval/store_test.go`):
+- `TestSearchKeyword_MatchesExact` — insert doc with "Kubernetes deployment"; keyword search "Kubernetes"; verify doc returned
+- `TestSearchKeyword_NoMatch` — keyword search with unrelated term; verify empty result
+- `TestSearchKeyword_TopK` — insert 10 docs; search with topK=3; verify exactly 3 returned
+- `TestSearchHybrid_BlendsScores` — insert doc that scores high on keyword but low on vector; verify hybrid score reflects blend ratio
+- `TestSearchHybrid_DeduplicatesResults` — same doc appears in both keyword and vector results; verify single entry with blended score
+- `TestSearchHybrid_VectorOnlyFallback` — empty keyword query; verify vector-only results returned
+
+**Unit tests** (`internal/intent/extractor_test.go`):
+- `TestExtract_SearchStrategy` — mock returns `{"search_strategy":"hybrid","hybrid_ratio":0.6,...}`; verify fields populated
+- `TestExtract_DefaultStrategy` — mock returns intent without search fields; verify defaults applied (SearchStrategy="" treated as "hybrid", HybridRatio=0.7)
+
+**Acceptance criteria:**
+- Entity-heavy query "find docs about Kubernetes" retrieves docs containing "Kubernetes" even if embedding similarity is moderate
+- Conceptual query "how to approach testing" retrieves semantically relevant docs even without keyword overlap
+- Hybrid search outperforms vector-only search on a mixed benchmark (entity + semantic queries)
+- FTS5 triggers keep keyword index in sync with insert/delete/update on `context_vectors`
+- `go test ./internal/retrieval/...` passes
+
+---
+
+## Issue 1.9 — Retrieval reranking
+
+**Context:** After hybrid retrieval returns top-K candidates ranked by a blend of cosine similarity and BM25, the ordering may not reflect true query relevance. A cross-encoder or LLM-based reranker re-scores each (query, chunk) pair to produce a more accurate relevance ranking before prompt composition. This catches "related but not useful" chunks that score well on surface similarity.
+
+**Tasks:**
+- Create `internal/reranking/reranker.go`:
+  - `Reranker` interface:
+    ```go
+    type Reranker interface {
+        Rerank(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error)
+    }
+    ```
+  - `LLMReranker` struct wrapping `engine.Engine`:
+    - For each chunk, calls the fast model (phi3.5) with a scoring prompt:
+      ```
+      Rate the relevance of the following text to the query on a scale of 0.0 to 1.0.
+      Query: {query}
+      Text: {chunk.Text}
+      Respond with only a JSON object: {"score": <float>}
+      ```
+    - Batches scoring calls concurrently (bounded concurrency, e.g., 3 at a time)
+    - Timeout: 5s total for all chunks (not per-chunk)
+    - Re-sorts chunks by reranker score descending
+    - Drops chunks with score < threshold (default: 0.3, configurable)
+  - `NoOpReranker` — returns chunks unchanged (passthrough)
+  - Constructor: `NewReranker(engine engine.Engine, enabled bool) Reranker`
+    - Returns `LLMReranker` if enabled, `NoOpReranker` otherwise
+- Update `internal/pipeline/enrichment.go`:
+  - Add `reranker reranking.Reranker` field to `Enricher` struct
+  - Insert reranking step between retrieval and composition:
+    ```go
+    chunks := e.retriever.RetrieveForIntent(ctx, lastUserMsg, extracted, topK)
+    chunks, err = e.reranker.Rerank(ctx, lastUserMsg, chunks)
+    if err != nil {
+        slog.Warn("reranking failed, using original order", "error", err)
+        // proceed with original chunks — graceful degradation
+    }
+    ```
+  - Track reranking duration in `EnrichmentMetadata`
+- Config key: `enrichment.reranking_enabled` (default: true)
+
+**Unit tests** (`internal/reranking/reranker_test.go`) — mock `engine.Engine`:
+- `TestLLMReranker_ReordersChunks` — mock returns scores [0.9, 0.3, 0.7] for 3 chunks; verify output order is [0.9, 0.7, 0.3]
+- `TestLLMReranker_DropsLowScore` — mock returns score 0.1 for one chunk (below threshold 0.3); verify chunk is dropped
+- `TestLLMReranker_Timeout` — mock hangs > 5s; verify function returns within 5.5s with original chunks (graceful degradation)
+- `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk gets a default score (not dropped, not crash)
+- `TestLLMReranker_EmptyChunks` — pass empty slice; verify empty slice returned (no error)
+- `TestNoOpReranker` — verify chunks returned in original order unchanged
+- `TestNewReranker_Enabled` — verify returns `*LLMReranker`
+- `TestNewReranker_Disabled` — verify returns `*NoOpReranker`
+
+**Unit tests** (`internal/pipeline/enrichment_test.go`):
+- `TestEnrich_WithReranker` — mock reranker reorders chunks; verify composed request uses reranked order
+- `TestEnrich_RerankerFails` — mock reranker returns error; verify enrichment proceeds with original chunk order
+
+**Acceptance criteria:**
+- Reranker improves retrieval precision: top-3 chunks after reranking are more query-relevant than top-3 by cosine similarity alone
+- Reranking adds < 1.5s latency for 10 chunks on Apple Silicon
+- Pipeline gracefully degrades if reranker fails (logs warning, uses original order)
+- `go test ./internal/reranking/...` passes
+- `go test ./internal/pipeline/...` passes
+
+---
+
+## Issue 1.10 — Query-level caching (exact + semantic)
+
+**Context:** Every query currently runs the full enrichment pipeline (intent extraction + embedding + search + reranking + composition), even for identical or very similar queries. A two-level cache avoids redundant work: Level 1 catches exact repeated queries, Level 2 catches semantically similar rephrasings.
+
+**Tasks:**
+- Create `internal/cache/query.go`:
+  - `QueryCache` struct:
+    ```go
+    type QueryCache struct {
+        mu             sync.RWMutex
+        exactCache     map[string]CachedEnrichment  // SHA256(normalized_query) → result
+        semanticCache  []SemanticEntry               // query embedding + result
+        embedder       retrieval.Embedder
+        enabled        bool
+        semThreshold   float64  // cosine similarity threshold for L2 hit (default 0.92)
+        exactTTL       time.Duration  // default 5m
+        semanticTTL    time.Duration  // default 30m
+    }
+
+    type CachedEnrichment struct {
+        EnrichedRequest proxy.ChatRequest
+        Metadata        pipeline.EnrichmentMetadata
+        CachedAt        time.Time
+    }
+
+    type SemanticEntry struct {
+        QueryHash  string
+        Embedding  []float32
+        Result     CachedEnrichment
+        CachedAt   time.Time
+    }
+    ```
+  - `Get(ctx context.Context, query string) (CachedEnrichment, bool)`:
+    1. Normalize query (lowercase, collapse whitespace)
+    2. Level 1: check exact cache by SHA256 hash → return if found and not expired
+    3. Level 2: embed query, scan semantic cache for cosine similarity ≥ threshold → return if found and not expired
+    4. Return miss
+  - `Set(ctx context.Context, query string, result CachedEnrichment)`:
+    1. Normalize and hash query
+    2. Store in exact cache
+    3. Embed query, store in semantic cache
+  - `Invalidate()` — clear both caches (called on profile update or context doc change)
+  - Background goroutine: evict expired entries every 60s
+- Constructor: `NewQueryCache(embedder, enabled, semThreshold, exactTTL, semanticTTL) *QueryCache`
+- Update `internal/pipeline/enrichment.go`:
+  - Add `cache *cache.QueryCache` field to `Enricher`
+  - Before pipeline steps: check cache → on hit, return cached result with `meta.CacheHit = true`
+  - After pipeline completes: store result in cache
+  - Add `CacheHit bool` and `CacheLevel string` fields to `EnrichmentMetadata`
+- Wire cache invalidation:
+  - In `internal/profile/manager.go`: on `SetField()`, call `cache.Invalidate()` (via callback or event)
+  - In ingestion handler: after storing new context doc, call `cache.Invalidate()`
+- Config keys:
+  - `enrichment.cache_enabled` (default: true)
+  - `enrichment.cache_semantic_threshold` (default: 0.92)
+  - `enrichment.cache_exact_ttl` (default: "5m")
+  - `enrichment.cache_semantic_ttl` (default: "30m")
+
+**Unit tests** (`internal/cache/query_test.go`) — mock embedder:
+- `TestExactCacheHit` — set entry, get with identical query; verify hit
+- `TestExactCacheMiss` — get with different query; verify miss
+- `TestExactCacheTTL` — set entry, advance clock past TTL; verify miss
+- `TestSemanticCacheHit` — set entry; get with query whose embedding has cosine similarity > threshold; verify hit
+- `TestSemanticCacheMiss` — get with query whose embedding has low similarity; verify miss
+- `TestSemanticCacheTTL` — set entry, advance clock past semantic TTL; verify miss
+- `TestInvalidate` — set entries, call Invalidate(), get; verify all misses
+- `TestCacheDisabled` — create with enabled=false; set + get; verify always miss
+- `TestNormalization` — "Hello World" and "  hello  world  " should produce same cache key
+
+**Unit tests** (`internal/pipeline/enrichment_test.go`):
+- `TestEnrich_CacheHit` — pre-populate cache; verify pipeline steps (extractor, retriever) are NOT called
+- `TestEnrich_CacheMiss` — empty cache; verify full pipeline runs and result is cached
+- `TestEnrich_CacheInvalidatedOnProfileUpdate` — set cache, update profile, query again; verify cache miss
+
+**Acceptance criteria:**
+- Identical query served from cache with < 5ms latency (no LLM call, no embedding, no search)
+- Semantically similar query (cosine ≥ 0.92) served from cache
+- Cache invalidated when profile or context changes
+- Cache disabled when `enrichment.cache_enabled = false`
+- `go test ./internal/cache/...` passes
+- `go test ./internal/pipeline/...` passes
+
+---
+
 ## Phase 1 Verification
 
 Run this checklist before declaring Phase 1 complete:
 
+**Core enrichment (issues 1.1–1.7):**
 1. Add a context document manually to the VectorStore (via test script or SQLite insert)
 2. Send a related query via `curl` → verify the enriched prompt in the interaction log contains the context
 3. Send an unrelated query → verify no spurious context is injected
 4. Kill Ollama mid-request → verify the proxy gracefully falls back to passthrough
 5. Set profile field `tone = "direct"` → verify it appears in the enriched system prompt
 6. Check enrichment latency with `time curl ...` — should be under 2s total
-7. `go test ./...` passes
-8. `go test -tags integration ./...` passes
+
+**Hybrid retrieval (issue 1.8):**
+7. Add context docs with specific entity names (e.g., "Kubernetes", "PostgreSQL")
+8. Query using exact entity name → verify keyword/BM25 search contributes to retrieval
+9. Query using semantic paraphrase → verify vector search contributes to retrieval
+10. Compare: hybrid search should return more relevant results than vector-only for entity-heavy queries
+
+**Reranking (issue 1.9):**
+11. Add 10+ context docs with varying relevance to a test query
+12. Query with reranking enabled → verify top chunks are more relevant than cosine-only ordering
+13. Disable reranker via config → verify pipeline still works (NoOp passthrough)
+14. Timeout reranker (e.g., by setting very low timeout) → verify graceful degradation
+
+**Query cache (issue 1.10):**
+15. Send identical query twice → verify second request completes significantly faster (cache hit logged)
+16. Send semantically similar query → verify semantic cache hit (logged as L2 hit)
+17. Add new context document → verify next query is a cache miss (invalidation worked)
+18. Update profile field → verify next query is a cache miss (invalidation worked)
+19. Disable cache via config → verify every query runs full pipeline
+
+**All issues:**
+20. `go test ./...` passes
+21. `go test -tags integration ./...` passes
