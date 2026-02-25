@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/kalambet/tbyd/internal/config"
 )
 
 // setupTestServer creates an httptest.Server that records requests and returns configured responses.
@@ -66,7 +69,6 @@ func TestIngestCommand_Text(t *testing.T) {
 		"POST /ingest": `{"id":"doc-123","status":"queued"}`,
 	})
 
-	// Override newAPIClient for this test by directly using the apiClient.
 	client := ts.client()
 
 	req := map[string]any{
@@ -121,6 +123,9 @@ func TestIngestCommand_Text(t *testing.T) {
 }
 
 func TestIngestCommand_MissingArgs(t *testing.T) {
+	// Reset rootCmd args after test.
+	defer rootCmd.SetArgs(nil)
+
 	rootCmd.SetArgs([]string{"ingest"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -221,6 +226,34 @@ func TestRecallCommand(t *testing.T) {
 	}
 }
 
+func TestRecallCommand_URLEncoding(t *testing.T) {
+	ts := newTestServer(t, map[string]string{
+		"GET /recall": `[]`,
+	})
+
+	client := ts.client()
+	query := "go & python preferences"
+	path := fmt.Sprintf("/recall?q=%s&limit=5", url.QueryEscape(query))
+	resp, err := client.get(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if len(ts.requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(ts.requests))
+	}
+
+	// Verify the query was properly encoded in the request path.
+	reqPath := ts.requests[0].Path
+	if strings.Contains(reqPath, "& python") {
+		t.Errorf("query not URL-encoded: %q", reqPath)
+	}
+	if !strings.Contains(reqPath, "q=go+%26+python+preferences") {
+		t.Errorf("unexpected encoded path: %q", reqPath)
+	}
+}
+
 func TestStatusCommand_Running(t *testing.T) {
 	ts := newTestServer(t, map[string]string{
 		"GET /health": `{"status":"ok"}`,
@@ -308,7 +341,6 @@ func TestDataExportFormat(t *testing.T) {
 
 	client := ts.client()
 
-	// First call returns docs.
 	resp, err := client.get("/context-docs?limit=100&offset=0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -391,13 +423,64 @@ func TestDecodeJSON_ErrorResponse(t *testing.T) {
 	}
 }
 
-func TestConfigShow(t *testing.T) {
-	// Verify ShowAll returns expected key structure.
-	// We can't test the full config.Load() without env setup,
-	// but we can verify ShowAll doesn't panic.
-	// This is more of a smoke test.
-	keys := fmt.Sprintf("%v", "server.port")
-	if keys == "" {
-		t.Error("expected non-empty keys")
+func TestConfigShowAll(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Server.Port = 4000
+	cfg.Ollama.FastModel = "phi3.5"
+
+	keys := config.ShowAll(cfg)
+	if len(keys) == 0 {
+		t.Fatal("expected non-empty keys from ShowAll")
+	}
+
+	found := false
+	for _, k := range keys {
+		if k.Key == "server.port" && k.Value == "4000" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected to find server.port=4000 in ShowAll output")
+	}
+}
+
+func TestPurgeEndpoint_CollectsFailures(t *testing.T) {
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			if callCount == 0 {
+				callCount++
+				w.Write([]byte(`[{"id":"doc-1"},{"id":"doc-2"}]`))
+			} else {
+				w.Write([]byte(`[]`))
+			}
+			return
+		}
+		if r.Method == "DELETE" {
+			if strings.HasSuffix(r.URL.Path, "doc-1") {
+				w.WriteHeader(500)
+				w.Write([]byte(`{"error":{"message":"internal error"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"status":"deleted"}`))
+			return
+		}
+	}))
+	defer ts.Close()
+
+	client := &apiClient{
+		baseURL:    ts.URL,
+		token:      "test",
+		httpClient: ts.Client(),
+	}
+
+	failures, err := purgeEndpoint(client, "/items")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if failures != 1 {
+		t.Errorf("failures = %d, want 1", failures)
 	}
 }

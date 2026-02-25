@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -223,10 +224,10 @@ var profileEditCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer patchResp.Body.Close()
 
-		if patchResp.StatusCode >= 400 {
-			return fmt.Errorf("server returned %d", patchResp.StatusCode)
+		var patchResult map[string]string
+		if err := decodeJSON(patchResp, &patchResult); err != nil {
+			return err
 		}
 
 		printSuccess("Profile updated")
@@ -255,7 +256,7 @@ var recallCmd = &cobra.Command{
 			return err
 		}
 
-		path := fmt.Sprintf("/recall?q=%s&limit=%d", query, limit)
+		path := fmt.Sprintf("/recall?q=%s&limit=%d", url.QueryEscape(query), limit)
 		resp, err := client.get(path)
 		if err != nil {
 			return err
@@ -415,46 +416,11 @@ var dataExportCmd = &cobra.Command{
 
 		enc := json.NewEncoder(writer)
 
-		// Export context docs.
-		offset := 0
-		for {
-			resp, err := client.get(fmt.Sprintf("/context-docs?limit=100&offset=%d", offset))
-			if err != nil {
-				return err
-			}
-			var docs []any
-			if err := decodeJSON(resp, &docs); err != nil {
-				return err
-			}
-			if len(docs) == 0 {
-				break
-			}
-			for _, doc := range docs {
-				record := map[string]any{"type": "context_doc", "data": doc}
-				enc.Encode(record)
-			}
-			offset += len(docs)
+		if err := exportPagedData(client, enc, "/context-docs", "context_doc"); err != nil {
+			return err
 		}
-
-		// Export interactions.
-		offset = 0
-		for {
-			resp, err := client.get(fmt.Sprintf("/interactions?limit=100&offset=%d", offset))
-			if err != nil {
-				return err
-			}
-			var interactions []any
-			if err := decodeJSON(resp, &interactions); err != nil {
-				return err
-			}
-			if len(interactions) == 0 {
-				break
-			}
-			for _, ix := range interactions {
-				record := map[string]any{"type": "interaction", "data": ix}
-				enc.Encode(record)
-			}
-			offset += len(interactions)
+		if err := exportPagedData(client, enc, "/interactions", "interaction"); err != nil {
+			return err
 		}
 
 		if output != "" {
@@ -462,6 +428,31 @@ var dataExportCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func exportPagedData(client *apiClient, enc *json.Encoder, path, recordType string) error {
+	offset := 0
+	for {
+		resp, err := client.get(fmt.Sprintf("%s?limit=100&offset=%d", path, offset))
+		if err != nil {
+			return err
+		}
+		var items []any
+		if err := decodeJSON(resp, &items); err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			break
+		}
+		for _, item := range items {
+			record := map[string]any{"type": recordType, "data": item}
+			if err := enc.Encode(record); err != nil {
+				return fmt.Errorf("encoding %s: %w", recordType, err)
+			}
+		}
+		offset += len(items)
+	}
+	return nil
 }
 
 var dataPurgeCmd = &cobra.Command{
@@ -479,55 +470,62 @@ var dataPurgeCmd = &cobra.Command{
 			return err
 		}
 
-		// Delete all context docs.
+		var failures int
+
 		printStep("Deleting context docs...")
-		for {
-			resp, err := client.get("/context-docs?limit=100")
-			if err != nil {
-				return err
-			}
-			var docs []struct {
-				ID string `json:"id"`
-			}
-			if err := decodeJSON(resp, &docs); err != nil {
-				return err
-			}
-			if len(docs) == 0 {
-				break
-			}
-			for _, doc := range docs {
-				if _, err := client.delete("/context-docs/" + doc.ID); err != nil {
-					printError("Failed to delete doc %s: %v", doc.ID, err)
-				}
-			}
+		n, err := purgeEndpoint(client, "/context-docs")
+		failures += n
+		if err != nil {
+			return err
 		}
 
-		// Delete all interactions.
 		printStep("Deleting interactions...")
-		for {
-			resp, err := client.get("/interactions?limit=100")
-			if err != nil {
-				return err
-			}
-			var interactions []struct {
-				ID string `json:"id"`
-			}
-			if err := decodeJSON(resp, &interactions); err != nil {
-				return err
-			}
-			if len(interactions) == 0 {
-				break
-			}
-			for _, ix := range interactions {
-				if _, err := client.delete("/interactions/" + ix.ID); err != nil {
-					printError("Failed to delete interaction %s: %v", ix.ID, err)
-				}
-			}
+		n, err = purgeEndpoint(client, "/interactions")
+		failures += n
+		if err != nil {
+			return err
+		}
+
+		if failures > 0 {
+			printError("%d deletion(s) failed", failures)
+			return fmt.Errorf("%d deletion(s) failed during purge", failures)
 		}
 
 		printSuccess("All data purged")
 		return nil
 	},
+}
+
+func purgeEndpoint(client *apiClient, path string) (failures int, _ error) {
+	for {
+		resp, err := client.get(path + "?limit=100")
+		if err != nil {
+			return failures, err
+		}
+		var items []struct {
+			ID string `json:"id"`
+		}
+		if err := decodeJSON(resp, &items); err != nil {
+			return failures, err
+		}
+		if len(items) == 0 {
+			break
+		}
+		for _, item := range items {
+			delResp, err := client.delete(path + "/" + item.ID)
+			if err != nil {
+				printError("Failed to delete %s: %v", item.ID, err)
+				failures++
+				continue
+			}
+			delResp.Body.Close()
+			if delResp.StatusCode >= 400 {
+				printError("Failed to delete %s: HTTP %d", item.ID, delResp.StatusCode)
+				failures++
+			}
+		}
+	}
+	return failures, nil
 }
 
 func init() {

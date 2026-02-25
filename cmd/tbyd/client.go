@@ -80,7 +80,10 @@ func (c *apiClient) delete(path string) (*http.Response, error) {
 func decodeJSON(resp *http.Response, v any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("server returned %d (failed to read body: %w)", resp.StatusCode, err)
+		}
 		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body))
 	}
 	return json.NewDecoder(resp.Body).Decode(v)

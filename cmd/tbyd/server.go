@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -99,15 +100,18 @@ func runServer() error {
 	}
 	slog.Info("API bearer token available")
 
-	// Write PID file.
+	// Write PID file. Check if server is already running via health endpoint.
 	pidPath := pidFilePath(cfg.Storage.DataDir)
-	if pid, err := readPIDFile(pidPath); err == nil {
-		if process, err := os.FindProcess(pid); err == nil {
-			if err := process.Signal(syscall.Signal(0)); err == nil {
-				printWarning("tbyd is already running (PID %d)", pid)
-				return fmt.Errorf("server already running (PID %d)", pid)
-			}
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", cfg.Server.Port)
+	healthClient := &http.Client{Timeout: 2 * time.Second}
+	if resp, err := healthClient.Get(healthURL); err == nil {
+		resp.Body.Close()
+		if pid, pidErr := readPIDFile(pidPath); pidErr == nil {
+			printWarning("tbyd is already running (PID %d)", pid)
+			return fmt.Errorf("server already running (PID %d)", pid)
 		}
+		printWarning("tbyd is already running on port %d", cfg.Server.Port)
+		return fmt.Errorf("server already running on port %d", cfg.Server.Port)
 	}
 	if err := writePIDFile(pidPath); err != nil {
 		return fmt.Errorf("writing PID file: %w", err)
@@ -300,16 +304,24 @@ func showStatus() error {
 	printStatus("Deep model", "%s", cfg.Ollama.DeepModel)
 	printStatus("Embed model", "%s", cfg.Ollama.EmbedModel)
 
-	// Check counts if server is running.
+	// Show doc/interaction counts if server is running.
 	apiToken, tokenErr := config.GetAPIToken(config.NewKeychain())
 	if tokenErr == nil && resp != nil && resp.StatusCode == 200 {
-		docsResp, err := apiGet(client, serverURL+"/context-docs?limit=0", apiToken)
+		docsResp, err := apiGet(client, serverURL+"/context-docs?limit=100", apiToken)
 		if err == nil {
-			defer docsResp.Body.Close()
+			var docs []json.RawMessage
+			if json.NewDecoder(docsResp.Body).Decode(&docs) == nil {
+				printStatus("Context docs", "%d", len(docs))
+			}
+			docsResp.Body.Close()
 		}
-		interResp, err2 := apiGet(client, serverURL+"/interactions?limit=0", apiToken)
+		interResp, err2 := apiGet(client, serverURL+"/interactions?limit=100", apiToken)
 		if err2 == nil {
-			defer interResp.Body.Close()
+			var interactions []json.RawMessage
+			if json.NewDecoder(interResp.Body).Decode(&interactions) == nil {
+				printStatus("Interactions", "%d", len(interactions))
+			}
+			interResp.Body.Close()
 		}
 	}
 
