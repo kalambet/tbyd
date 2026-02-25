@@ -1,177 +1,50 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
-	"time"
 
-	"github.com/go-chi/chi/v5"
-
-	"github.com/mark3labs/mcp-go/server"
-
-	"github.com/kalambet/tbyd/internal/api"
-	"github.com/kalambet/tbyd/internal/composer"
-	"github.com/kalambet/tbyd/internal/config"
-	"github.com/kalambet/tbyd/internal/engine"
-	"github.com/kalambet/tbyd/internal/ingest"
-	"github.com/kalambet/tbyd/internal/intent"
-	"github.com/kalambet/tbyd/internal/pipeline"
-	"github.com/kalambet/tbyd/internal/profile"
-	"github.com/kalambet/tbyd/internal/proxy"
-	"github.com/kalambet/tbyd/internal/retrieval"
-	"github.com/kalambet/tbyd/internal/storage"
+	"github.com/spf13/cobra"
 )
 
 var version = "dev"
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
+var noColor bool
+
+var rootCmd = &cobra.Command{
+	Use:   "tbyd",
+	Short: "tbyd — local-first personal knowledge base",
+	Long:  "A local-first data sovereignty layer that enriches cloud LLM interactions with personal context.",
+	CompletionOptions: cobra.CompletionOptions{
+		DisableDefaultCmd: true,
+	},
 }
 
-func run() error {
-	fmt.Fprintf(os.Stderr, "tbyd version %s\n", version)
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colorized output")
 
-	// Load config.
-	cfg, err := config.Load()
-	if err != nil {
-		return err
+	rootCmd.AddCommand(startCmd)
+	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(ingestCmd)
+	rootCmd.AddCommand(profileCmd)
+	rootCmd.AddCommand(recallCmd)
+	rootCmd.AddCommand(interactionsCmd)
+	rootCmd.AddCommand(dataCmd)
+	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(versionCmd)
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print tbyd version",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println(version)
+	},
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
 	}
-
-	// Initialize structured logging.
-	logLevel := slog.LevelInfo
-	if strings.EqualFold(cfg.Log.Level, "debug") {
-		logLevel = slog.LevelDebug
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-
-	// Ensure API token exists in platform secret store.
-	if _, err := config.GetAPIToken(config.NewKeychain()); err != nil {
-		return fmt.Errorf("initializing API token: %w", err)
-	}
-	slog.Info("API bearer token available")
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Detect and check local inference engine readiness.
-	eng, err := engine.Detect(engine.DetectConfig{OllamaBaseURL: cfg.Ollama.BaseURL})
-	if err != nil {
-		return fmt.Errorf("detecting inference engine: %w", err)
-	}
-	if err := engine.EnsureReady(ctx, eng, cfg.Ollama.FastModel, cfg.Ollama.EmbedModel, os.Stderr); err != nil {
-		return err
-	}
-
-	// Open storage.
-	store, err := storage.Open(cfg.Storage.DataDir)
-	if err != nil {
-		return fmt.Errorf("opening storage: %w", err)
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: closing storage: %v\n", err)
-		}
-	}()
-
-	// Build enrichment pipeline.
-	ollamaEngine := eng // engine.Engine backed by Ollama
-	extractor := intent.NewExtractor(engine.ChatAdapter(ollamaEngine), cfg.Ollama.FastModel)
-	embedder := retrieval.NewEmbedder(ollamaEngine, cfg.Ollama.EmbedModel)
-	vectorStore := retrieval.NewSQLiteStore(store.DB())
-	retriever := retrieval.NewRetriever(embedder, vectorStore)
-	profileMgr := profile.NewManager(store)
-	comp := composer.New(0) // default 4000 tokens
-	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, cfg.Retrieval.TopK)
-
-	// Retrieve API token for bearer auth on management endpoints.
-	apiToken, err := config.GetAPIToken(config.NewKeychain())
-	if err != nil {
-		return fmt.Errorf("getting API token: %w", err)
-	}
-
-	// Build HTTP handler and server.
-	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	openaiHandler := api.NewOpenAIHandler(proxyClient, enricher)
-	appHandler := api.NewAppHandler(api.AppDeps{
-		Store:      store,
-		Profile:    profileMgr,
-		Token:      apiToken,
-		HTTPClient: &http.Client{Timeout: 15 * time.Second},
-		Vectors:    vectorStore,
-	})
-
-	// Compose top-level router: OpenAI-compat routes + management/ingest routes.
-	topRouter := chi.NewRouter()
-	topRouter.Mount("/", openaiHandler)
-	topRouter.Mount("/", appHandler)
-
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: topRouter,
-	}
-
-	// Start ingest worker.
-	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
-	go worker.Run(ctx)
-
-	// Build and start MCP server (stdio transport in a goroutine).
-	mcpEngine := &api.EngineAdapter{
-		ChatFn: func(chatCtx context.Context, model string, messages []api.MCPMessage, _ *api.MCPSchema) (string, error) {
-			engineMsgs := make([]engine.Message, len(messages))
-			for i, m := range messages {
-				engineMsgs[i] = engine.Message{Role: m.Role, Content: m.Content}
-			}
-			return eng.Chat(chatCtx, model, engineMsgs, nil)
-		},
-	}
-	mcpSrv := api.NewMCPServer(api.MCPDeps{
-		Store:     store,
-		Profile:   profileMgr,
-		Retriever: retriever,
-		Engine:    mcpEngine,
-		DeepModel: cfg.Ollama.DeepModel,
-	})
-	stdioSrv := server.NewStdioServer(mcpSrv)
-	go func() {
-		if err := stdioSrv.Listen(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("MCP stdio server error", "error", err)
-		}
-	}()
-	slog.Info("MCP server started (stdio transport)")
-
-	// Start server in a goroutine.
-	errCh := make(chan error, 1)
-	go func() {
-		fmt.Fprintf(os.Stderr, "tbyd listening on %s\n", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	// Wait for signal or server error.
-	select {
-	case <-ctx.Done():
-		fmt.Fprintln(os.Stderr, "shutting down...")
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("server error: %w", err)
-		}
-	}
-
-	// Graceful shutdown with timeout.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
 }

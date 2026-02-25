@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kalambet/tbyd/internal/profile"
+	"github.com/kalambet/tbyd/internal/retrieval"
 	"github.com/kalambet/tbyd/internal/storage"
 )
 
@@ -42,6 +43,12 @@ type AppDeps struct {
 	Token      string
 	HTTPClient *http.Client
 	Vectors    VectorDeleter // optional; if nil, vector cleanup is skipped on delete
+	Retriever  Retriever     // optional; if nil, /recall returns 501
+}
+
+// Retriever abstracts semantic search for the management API layer.
+type Retriever interface {
+	Retrieve(ctx context.Context, query string, topK int) ([]retrieval.ContextChunk, error)
 }
 
 func NewAppHandler(deps AppDeps) http.Handler {
@@ -56,6 +63,7 @@ func NewAppHandler(deps AppDeps) http.Handler {
 	r.Delete("/interactions/{id}", handleDeleteInteraction(deps))
 	r.Get("/context-docs", handleListContextDocs(deps))
 	r.Delete("/context-docs/{id}", handleDeleteContextDoc(deps))
+	r.Get("/recall", handleRecall(deps))
 
 	return r
 }
@@ -338,6 +346,53 @@ func handleDeleteContextDoc(deps AppDeps) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
+	}
+}
+
+func handleRecall(deps AppDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if deps.Retriever == nil {
+			httpError(w, http.StatusNotImplemented, "api_error", "recall not available")
+			return
+		}
+
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			httpError(w, http.StatusBadRequest, "invalid_request_error", "q parameter is required")
+			return
+		}
+
+		limit := parseIntParam(r, "limit", 5, 50)
+
+		chunks, err := deps.Retriever.Retrieve(r.Context(), query, limit)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "api_error", "recall failed: %v", err)
+			return
+		}
+
+		type chunkResult struct {
+			ID         string  `json:"id"`
+			SourceID   string  `json:"source_id"`
+			SourceType string  `json:"source_type"`
+			Text       string  `json:"text"`
+			Score      float32 `json:"score"`
+			Tags       string  `json:"tags,omitempty"`
+		}
+
+		results := make([]chunkResult, len(chunks))
+		for i, c := range chunks {
+			results[i] = chunkResult{
+				ID:         c.ID,
+				SourceID:   c.SourceID,
+				SourceType: c.SourceType,
+				Text:       c.Text,
+				Score:      c.Score,
+				Tags:       c.Tags,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(results)
 	}
 }
 
