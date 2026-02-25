@@ -311,7 +311,7 @@ func showStatus() error {
 		if err == nil {
 			var docs []json.RawMessage
 			if json.NewDecoder(docsResp.Body).Decode(&docs) == nil {
-				printStatus("Context docs", "%d", len(docs))
+				printStatus("Context docs", "%s", countLabel(len(docs), 100))
 			}
 			docsResp.Body.Close()
 		}
@@ -319,7 +319,7 @@ func showStatus() error {
 		if err2 == nil {
 			var interactions []json.RawMessage
 			if json.NewDecoder(interResp.Body).Decode(&interactions) == nil {
-				printStatus("Interactions", "%d", len(interactions))
+				printStatus("Interactions", "%s", countLabel(len(interactions), 100))
 			}
 			interResp.Body.Close()
 		}
@@ -327,6 +327,13 @@ func showStatus() error {
 
 	printStatus("Data dir", "%s", cfg.Storage.DataDir)
 	return nil
+}
+
+func countLabel(count, limit int) string {
+	if count >= limit {
+		return fmt.Sprintf("%d+", count)
+	}
+	return fmt.Sprintf("%d", count)
 }
 
 func apiGet(client *http.Client, url, token string) (*http.Response, error) {

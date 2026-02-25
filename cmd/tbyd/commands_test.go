@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"github.com/kalambet/tbyd/internal/config"
 )
 
-// setupTestServer creates an httptest.Server that records requests and returns configured responses.
 type recordedRequest struct {
 	Method string
 	Path   string
@@ -64,6 +64,8 @@ func (ts *testServer) client() *apiClient {
 	}
 }
 
+var ctx = context.Background()
+
 func TestIngestCommand_Text(t *testing.T) {
 	ts := newTestServer(t, map[string]string{
 		"POST /ingest": `{"id":"doc-123","status":"queued"}`,
@@ -78,7 +80,7 @@ func TestIngestCommand_Text(t *testing.T) {
 		"tags":    []string{"foo"},
 	}
 
-	resp, err := client.post("/ingest", req)
+	resp, err := client.post(ctx, "/ingest", req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +125,6 @@ func TestIngestCommand_Text(t *testing.T) {
 }
 
 func TestIngestCommand_MissingArgs(t *testing.T) {
-	// Reset rootCmd args after test.
 	defer rootCmd.SetArgs(nil)
 
 	rootCmd.SetArgs([]string{"ingest"})
@@ -142,7 +143,7 @@ func TestProfileShow(t *testing.T) {
 	})
 
 	client := ts.client()
-	resp, err := client.get("/profile")
+	resp, err := client.get(ctx, "/profile")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestProfileSet(t *testing.T) {
 
 	client := ts.client()
 	body := map[string]any{"communication.tone": "direct"}
-	resp, err := client.patch("/profile", body)
+	resp, err := client.patch(ctx, "/profile", body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestRecallCommand(t *testing.T) {
 	})
 
 	client := ts.client()
-	resp, err := client.get("/recall?q=go+preferences&limit=5")
+	resp, err := client.get(ctx, "/recall?q=go+preferences&limit=5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestRecallCommand_URLEncoding(t *testing.T) {
 	client := ts.client()
 	query := "go & python preferences"
 	path := fmt.Sprintf("/recall?q=%s&limit=5", url.QueryEscape(query))
-	resp, err := client.get(path)
+	resp, err := client.get(ctx, path)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,7 +245,6 @@ func TestRecallCommand_URLEncoding(t *testing.T) {
 		t.Fatalf("expected 1 request, got %d", len(ts.requests))
 	}
 
-	// Verify the query was properly encoded in the request path.
 	reqPath := ts.requests[0].Path
 	if strings.Contains(reqPath, "& python") {
 		t.Errorf("query not URL-encoded: %q", reqPath)
@@ -260,7 +260,7 @@ func TestStatusCommand_Running(t *testing.T) {
 	})
 
 	client := ts.client()
-	resp, err := client.get("/health")
+	resp, err := client.get(ctx, "/health")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -272,12 +272,11 @@ func TestStatusCommand_Running(t *testing.T) {
 }
 
 func TestStatusCommand_Stopped(t *testing.T) {
-	// Use a closed server to simulate unreachable.
 	ts := newTestServer(t, map[string]string{})
 	ts.server.Close()
 
 	client := ts.client()
-	_, err := client.get("/health")
+	_, err := client.get(ctx, "/health")
 	if err == nil {
 		t.Fatal("expected error for stopped server")
 	}
@@ -287,7 +286,6 @@ func TestStatusCommand_Stopped(t *testing.T) {
 }
 
 func TestNoColorFlag(t *testing.T) {
-	// Save and restore.
 	old := noColor
 	defer func() { noColor = old }()
 
@@ -313,7 +311,7 @@ func TestInteractionsList(t *testing.T) {
 	})
 
 	client := ts.client()
-	resp, err := client.get("/interactions?limit=20")
+	resp, err := client.get(ctx, "/interactions?limit=20")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -341,7 +339,7 @@ func TestDataExportFormat(t *testing.T) {
 
 	client := ts.client()
 
-	resp, err := client.get("/context-docs?limit=100&offset=0")
+	resp, err := client.get(ctx, "/context-docs?limit=100&offset=0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -350,7 +348,6 @@ func TestDataExportFormat(t *testing.T) {
 		t.Fatalf("decode error: %v", err)
 	}
 
-	// Verify JSONL encoding.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	for _, doc := range docs {
@@ -382,7 +379,7 @@ func TestAPIClientAuth(t *testing.T) {
 	client := ts.client()
 	client.token = "my-secret-token"
 
-	_, err := client.get("/health")
+	_, err := client.get(ctx, "/health")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -408,7 +405,7 @@ func TestDecodeJSON_ErrorResponse(t *testing.T) {
 		httpClient: ts.Client(),
 	}
 
-	resp, err := client.get("/profile")
+	resp, err := client.get(ctx, "/profile")
 	if err != nil {
 		t.Fatalf("unexpected transport error: %v", err)
 	}
@@ -476,11 +473,29 @@ func TestPurgeEndpoint_CollectsFailures(t *testing.T) {
 		httpClient: ts.Client(),
 	}
 
-	failures, err := purgeEndpoint(client, "/items")
+	failures, err := purgeEndpoint(ctx, client, "/items")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if failures != 1 {
 		t.Errorf("failures = %d, want 1", failures)
+	}
+}
+
+func TestCountLabel(t *testing.T) {
+	tests := []struct {
+		count, limit int
+		want         string
+	}{
+		{5, 100, "5"},
+		{0, 100, "0"},
+		{100, 100, "100+"},
+		{150, 100, "150+"},
+	}
+	for _, tt := range tests {
+		got := countLabel(tt.count, tt.limit)
+		if got != tt.want {
+			t.Errorf("countLabel(%d, %d) = %q, want %q", tt.count, tt.limit, got, tt.want)
+		}
 	}
 }

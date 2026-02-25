@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ func newAPIClient() (*apiClient, error) {
 	}, nil
 }
 
-func (c *apiClient) do(method, path string, body any) (*http.Response, error) {
+func (c *apiClient) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -45,7 +46,7 @@ func (c *apiClient) do(method, path string, body any) (*http.Response, error) {
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -61,20 +62,20 @@ func (c *apiClient) do(method, path string, body any) (*http.Response, error) {
 	return resp, nil
 }
 
-func (c *apiClient) get(path string) (*http.Response, error) {
-	return c.do("GET", path, nil)
+func (c *apiClient) get(ctx context.Context, path string) (*http.Response, error) {
+	return c.do(ctx, "GET", path, nil)
 }
 
-func (c *apiClient) post(path string, body any) (*http.Response, error) {
-	return c.do("POST", path, body)
+func (c *apiClient) post(ctx context.Context, path string, body any) (*http.Response, error) {
+	return c.do(ctx, "POST", path, body)
 }
 
-func (c *apiClient) patch(path string, body any) (*http.Response, error) {
-	return c.do("PATCH", path, body)
+func (c *apiClient) patch(ctx context.Context, path string, body any) (*http.Response, error) {
+	return c.do(ctx, "PATCH", path, body)
 }
 
-func (c *apiClient) delete(path string) (*http.Response, error) {
-	return c.do("DELETE", path, nil)
+func (c *apiClient) delete(ctx context.Context, path string) (*http.Response, error) {
+	return c.do(ctx, "DELETE", path, nil)
 }
 
 func decodeJSON(resp *http.Response, v any) error {

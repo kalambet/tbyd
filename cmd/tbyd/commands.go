@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -77,7 +78,7 @@ Examples:
 			return err
 		}
 
-		resp, err := client.post("/ingest", req)
+		resp, err := client.post(cmd.Context(), "/ingest", req)
 		if err != nil {
 			return err
 		}
@@ -116,7 +117,7 @@ var profileShowCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := client.get("/profile")
+		resp, err := client.get(cmd.Context(), "/profile")
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,7 @@ var profileSetCmd = &cobra.Command{
 		}
 
 		body := map[string]any{key: value}
-		resp, err := client.patch("/profile", body)
+		resp, err := client.patch(cmd.Context(), "/profile", body)
 		if err != nil {
 			return err
 		}
@@ -174,7 +175,7 @@ var profileEditCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := client.get("/profile")
+		resp, err := client.get(cmd.Context(), "/profile")
 		if err != nil {
 			return err
 		}
@@ -200,7 +201,9 @@ var profileEditCmd = &cobra.Command{
 			tmpFile.Close()
 			return err
 		}
-		tmpFile.Close()
+		if err := tmpFile.Close(); err != nil {
+			return err
+		}
 
 		editorCmd := exec.Command(editor, tmpPath)
 		editorCmd.Stdin = os.Stdin
@@ -220,7 +223,7 @@ var profileEditCmd = &cobra.Command{
 			return fmt.Errorf("invalid JSON: %w", err)
 		}
 
-		patchResp, err := client.patch("/profile", fields)
+		patchResp, err := client.patch(cmd.Context(), "/profile", fields)
 		if err != nil {
 			return err
 		}
@@ -257,7 +260,7 @@ var recallCmd = &cobra.Command{
 		}
 
 		path := fmt.Sprintf("/recall?q=%s&limit=%d", url.QueryEscape(query), limit)
-		resp, err := client.get(path)
+		resp, err := client.get(cmd.Context(), path)
 		if err != nil {
 			return err
 		}
@@ -317,7 +320,7 @@ var interactionsListCmd = &cobra.Command{
 		}
 
 		path := fmt.Sprintf("/interactions?limit=%d", limit)
-		resp, err := client.get(path)
+		resp, err := client.get(cmd.Context(), path)
 		if err != nil {
 			return err
 		}
@@ -362,7 +365,7 @@ var interactionsShowCmd = &cobra.Command{
 			return err
 		}
 
-		resp, err := client.get("/interactions/" + args[0])
+		resp, err := client.get(cmd.Context(), "/interactions/"+args[0])
 		if err != nil {
 			return err
 		}
@@ -414,12 +417,13 @@ var dataExportCmd = &cobra.Command{
 			writer = os.Stdout
 		}
 
+		ctx := cmd.Context()
 		enc := json.NewEncoder(writer)
 
-		if err := exportPagedData(client, enc, "/context-docs", "context_doc"); err != nil {
+		if err := exportPagedData(ctx, client, enc, "/context-docs", "context_doc"); err != nil {
 			return err
 		}
-		if err := exportPagedData(client, enc, "/interactions", "interaction"); err != nil {
+		if err := exportPagedData(ctx, client, enc, "/interactions", "interaction"); err != nil {
 			return err
 		}
 
@@ -430,10 +434,10 @@ var dataExportCmd = &cobra.Command{
 	},
 }
 
-func exportPagedData(client *apiClient, enc *json.Encoder, path, recordType string) error {
+func exportPagedData(ctx context.Context, client *apiClient, enc *json.Encoder, path, recordType string) error {
 	offset := 0
 	for {
-		resp, err := client.get(fmt.Sprintf("%s?limit=100&offset=%d", path, offset))
+		resp, err := client.get(ctx, fmt.Sprintf("%s?limit=100&offset=%d", path, offset))
 		if err != nil {
 			return err
 		}
@@ -470,17 +474,18 @@ var dataPurgeCmd = &cobra.Command{
 			return err
 		}
 
+		ctx := cmd.Context()
 		var failures int
 
 		printStep("Deleting context docs...")
-		n, err := purgeEndpoint(client, "/context-docs")
+		n, err := purgeEndpoint(ctx, client, "/context-docs")
 		failures += n
 		if err != nil {
 			return err
 		}
 
 		printStep("Deleting interactions...")
-		n, err = purgeEndpoint(client, "/interactions")
+		n, err = purgeEndpoint(ctx, client, "/interactions")
 		failures += n
 		if err != nil {
 			return err
@@ -496,9 +501,9 @@ var dataPurgeCmd = &cobra.Command{
 	},
 }
 
-func purgeEndpoint(client *apiClient, path string) (failures int, _ error) {
+func purgeEndpoint(ctx context.Context, client *apiClient, path string) (failures int, _ error) {
 	for {
-		resp, err := client.get(path + "?limit=100")
+		resp, err := client.get(ctx, path+"?limit=100")
 		if err != nil {
 			return failures, err
 		}
@@ -512,7 +517,7 @@ func purgeEndpoint(client *apiClient, path string) (failures int, _ error) {
 			break
 		}
 		for _, item := range items {
-			delResp, err := client.delete(path + "/" + item.ID)
+			delResp, err := client.delete(ctx, path+"/"+item.ID)
 			if err != nil {
 				printError("Failed to delete %s: %v", item.ID, err)
 				failures++
