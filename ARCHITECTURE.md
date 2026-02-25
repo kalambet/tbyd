@@ -369,7 +369,10 @@ The context retrieval pipeline uses a **hybrid search** strategy combining vecto
 - Entity-heavy queries (e.g., "find docs about Kubernetes rate limiting") → keyword-heavy blend (ratio ~0.3 vector / 0.7 keyword)
 - Conceptual queries (e.g., "how should I approach testing?") → vector-heavy blend (ratio ~0.8 vector / 0.2 keyword)
 - Default: 0.7 vector / 0.3 keyword when intent extraction fails or doesn't specify
-- Scores are min-max normalized independently before blending to account for different scales
+- Score fusion method (configurable):
+  - **Min-max normalization + weighted blend** (default): normalize each signal to 0–1, then blend. Simple and interpretable, but sensitive to outlier scores.
+  - **Reciprocal Rank Fusion (RRF)**: `score = Σ 1/(k + rank_i)` where k=60 (standard constant). More robust to outliers, only uses rank positions not raw scores. Preferred when score distributions vary significantly between vector and keyword search.
+- Config: `retrieval.fusion_method` ("weighted" | "rrf", default: "weighted")
 
 **FTS5 schema:**
 ```sql
@@ -391,14 +394,18 @@ type Reranker interface {
 }
 ```
 
-**Implementations:**
-- `LLMReranker` — uses the fast local model (phi3.5) to score each (query, chunk) pair on a 0–1 relevance scale. Adds ~0.5–1s latency for 5–10 chunks.
+**Phase 1 implementations:**
+- `LLMReranker` — uses the fast local model (phi3.5) to score each (query, chunk) pair on a 0–1 relevance scale. Adds ~1–2s latency for 5–10 chunks.
 - `NoOpReranker` — passthrough, returns chunks in original order. Used when reranking is disabled.
+
+**Future (post-Phase 1):**
+- `CrossEncoderReranker` — uses a dedicated cross-encoder model (e.g., `ms-marco-MiniLM-L-6-v2`) for faster, more accurate relevance scoring. Requires adding the model to Ollama or running a Python sidecar. Planned for when reranking latency needs to be reduced below 500ms.
 
 **Behavior:**
 - Chunks below a configurable relevance threshold (default: 0.3) are dropped
+- Configurable timeout (default: 10s) — with bounded concurrency of 3 and ~1s per LLM call, covers ~30 chunk evaluations
 - On timeout or error, gracefully degrades to original ranking
-- Config: `enrichment.reranking_enabled` (default: true)
+- Config: `enrichment.reranking_enabled` (default: true), `enrichment.reranking_timeout` (default: "10s"), `enrichment.reranking_threshold` (default: 0.3)
 
 ### Query Cache
 

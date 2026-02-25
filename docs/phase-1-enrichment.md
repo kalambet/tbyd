@@ -368,10 +368,11 @@
   - Normalize BM25 scores to 0–1 range (min-max normalization)
 - Implement `SearchHybrid` on `SQLiteStore`:
   - Run vector search and keyword search in parallel (goroutines)
-  - Normalize scores independently (min-max on each signal)
-  - Blend: `final_score = vectorWeight * vector_score + (1 - vectorWeight) * keyword_score`
-  - Deduplicate by record ID, keep highest blended score
-  - Return top-K sorted by blended score
+  - Score fusion (configurable via `retrieval.fusion_method`):
+    - **"weighted"** (default): min-max normalize each signal to 0–1, blend: `final_score = vectorWeight * vector_score + (1 - vectorWeight) * keyword_score`
+    - **"rrf"** (Reciprocal Rank Fusion): `score = 1/(k + vector_rank) + 1/(k + keyword_rank)` with k=60. More robust to outlier scores; uses rank positions only.
+  - Deduplicate by record ID, keep highest fused score
+  - Return top-K sorted by fused score
 - Extend `Intent` struct in `internal/intent/extractor.go`:
   ```go
   type Intent struct {
@@ -415,7 +416,7 @@
 
 ## Issue 1.9 — Retrieval reranking
 
-**Context:** After hybrid retrieval returns top-K candidates ranked by a blend of cosine similarity and BM25, the ordering may not reflect true query relevance. A cross-encoder or LLM-based reranker re-scores each (query, chunk) pair to produce a more accurate relevance ranking before prompt composition. This catches "related but not useful" chunks that score well on surface similarity.
+**Context:** After hybrid retrieval returns top-K candidates ranked by a blend of cosine similarity and BM25, the ordering may not reflect true query relevance. An LLM-based reranker re-scores each (query, chunk) pair to produce a more accurate relevance ranking before prompt composition. This catches "related but not useful" chunks that score well on surface similarity. Phase 1 uses the existing fast local model (phi3.5) for reranking; a dedicated cross-encoder model (faster, more accurate) is planned as a post-Phase 1 optimization once the `Reranker` interface is proven.
 
 **Tasks:**
 - Create `internal/reranking/reranker.go`:
@@ -434,11 +435,11 @@
       Respond with only a JSON object: {"score": <float>}
       ```
     - Batches scoring calls concurrently (bounded concurrency, e.g., 3 at a time)
-    - Timeout: 5s total for all chunks (not per-chunk)
+    - Timeout: configurable, default 10s total for all chunks (not per-chunk). With bounded concurrency of 3 and ~1s per LLM call, 10s covers ~30 chunk evaluations. Adjust via config for slower hardware.
     - Re-sorts chunks by reranker score descending
     - Drops chunks with score < threshold (default: 0.3, configurable)
   - `NoOpReranker` — returns chunks unchanged (passthrough)
-  - Constructor: `NewReranker(engine engine.Engine, enabled bool) Reranker`
+  - Constructor: `NewReranker(engine engine.Engine, enabled bool, timeout time.Duration) Reranker`
     - Returns `LLMReranker` if enabled, `NoOpReranker` otherwise
 - Update `internal/pipeline/enrichment.go`:
   - Add `reranker reranking.Reranker` field to `Enricher` struct
@@ -452,12 +453,15 @@
     }
     ```
   - Track reranking duration in `EnrichmentMetadata`
-- Config key: `enrichment.reranking_enabled` (default: true)
+- Config keys:
+  - `enrichment.reranking_enabled` (default: true)
+  - `enrichment.reranking_timeout` (default: "10s")
+  - `enrichment.reranking_threshold` (default: 0.3)
 
 **Unit tests** (`internal/reranking/reranker_test.go`) — mock `engine.Engine`:
 - `TestLLMReranker_ReordersChunks` — mock returns scores [0.9, 0.3, 0.7] for 3 chunks; verify output order is [0.9, 0.7, 0.3]
 - `TestLLMReranker_DropsLowScore` — mock returns score 0.1 for one chunk (below threshold 0.3); verify chunk is dropped
-- `TestLLMReranker_Timeout` — mock hangs > 5s; verify function returns within 5.5s with original chunks (graceful degradation)
+- `TestLLMReranker_Timeout` — create reranker with 2s timeout; mock hangs; verify function returns within 2.5s with original chunks (graceful degradation)
 - `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk gets a default score (not dropped, not crash)
 - `TestLLMReranker_EmptyChunks` — pass empty slice; verify empty slice returned (no error)
 - `TestNoOpReranker` — verify chunks returned in original order unchanged
@@ -470,7 +474,7 @@
 
 **Acceptance criteria:**
 - Reranker improves retrieval precision: top-3 chunks after reranking are more query-relevant than top-3 by cosine similarity alone
-- Reranking adds < 1.5s latency for 10 chunks on Apple Silicon
+- Reranking adds < 3s latency for 10 chunks on Apple Silicon (bounded concurrency of 3, ~1s per LLM call)
 - Pipeline gracefully degrades if reranker fails (logs warning, uses original order)
 - `go test ./internal/reranking/...` passes
 - `go test ./internal/pipeline/...` passes
@@ -517,15 +521,15 @@
     > is small, typically < 1000 entries due to TTL). If the cache grows beyond
     > ~10K entries in the future, swap to an HNSW index (e.g., via a Go binding
     > to `hnswlib`).
-  - `Get(ctx context.Context, query string) (CachedEnrichment, bool)`:
+  - `Get(ctx context.Context, query string) (CachedEnrichment, []float32, bool)`:
     1. Normalize query (lowercase, collapse whitespace)
     2. Level 1: check exact cache by SHA256 hash → return if found and not expired
-    3. Level 2: embed query, query VP-tree for nearest neighbor within threshold → return if found and not expired
-    4. Return miss
-  - `Set(ctx context.Context, query string, result CachedEnrichment)`:
+    3. Level 2: embed query **once**, query VP-tree for nearest neighbor within threshold → return if found and not expired
+    4. On miss: return the pre-computed embedding as second return value so the caller can reuse it for retrieval (avoids re-embedding the same query)
+  - `Set(ctx context.Context, query string, queryEmbedding []float32, result CachedEnrichment)`:
     1. Normalize and hash query
     2. Store in exact cache
-    3. Embed query, store in semantic cache map, rebuild VP-tree index
+    3. Store pre-computed embedding in semantic cache map, rebuild VP-tree index
   - `Invalidate()` — clear both caches and reset VP-tree (called on profile update or bulk operations)
   - `InvalidateByTopics(topics []string)` — selective invalidation: evict only cached entries whose intent topics overlap with the given topics. Falls back to full `Invalidate()` if topic matching is unavailable (e.g., cached entry has no intent metadata).
   - Background goroutine: evict expired entries every 60s, rebuild VP-tree after eviction
@@ -533,8 +537,10 @@
 - Update `internal/pipeline/enrichment.go`:
   - Add `cache *cache.QueryCache` field to `Enricher`
   - Before pipeline steps: check cache → on hit, return cached result with `meta.CacheHit = true`
-  - After pipeline completes: store result in cache (include intent topics in `CachedEnrichment` for selective invalidation)
+  - On cache miss: `Get()` returns the pre-computed query embedding → pass it to `Retriever.RetrieveForIntent()` via a `WithEmbedding` option to avoid re-embedding the same query
+  - After pipeline completes: store result in cache with the same pre-computed embedding (include intent topics in `CachedEnrichment` for selective invalidation)
   - Add `CacheHit bool` and `CacheLevel string` fields to `EnrichmentMetadata`
+  > **Embedding reuse:** The query embedding is computed at most once per request. The cache `Get()` computes it for L2 lookup and returns it on miss. The retriever and cache `Set()` both accept the pre-computed vector, eliminating redundant embedding calls.
 - Wire cache invalidation:
   - In `internal/profile/manager.go`: on `SetField()`, call `cache.Invalidate()` (full — profile changes affect all enrichments)
   - In ingestion handler: after storing new context doc, call `cache.InvalidateByTopics(doc.Topics)` if topics available, else `cache.Invalidate()`
