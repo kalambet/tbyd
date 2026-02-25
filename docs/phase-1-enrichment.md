@@ -487,11 +487,12 @@
     ```go
     type QueryCache struct {
         mu             sync.RWMutex
-        exactCache     map[string]CachedEnrichment  // SHA256(normalized_query) → result
-        semanticCache  []SemanticEntry               // query embedding + result
+        exactCache     map[string]CachedEnrichment       // SHA256(normalized_query) → result
+        semanticCache  map[string]SemanticEntry           // query hash → embedding + result
+        semanticIndex  *VPTree                            // vantage-point tree for ANN lookup
         embedder       retrieval.Embedder
         enabled        bool
-        semThreshold   float64  // cosine similarity threshold for L2 hit (default 0.92)
+        semThreshold   float64        // cosine similarity threshold for L2 hit (default 0.92)
         exactTTL       time.Duration  // default 5m
         semanticTTL    time.Duration  // default 30m
     }
@@ -509,26 +510,34 @@
         CachedAt   time.Time
     }
     ```
+    > **Scaling note:** The semantic cache uses a vantage-point tree (VP-tree) for
+    > O(log n) nearest-neighbor lookup instead of linear scanning. A VP-tree is
+    > simple to implement for cosine distance over 768-d embeddings and avoids the
+    > O(n) bottleneck of a slice scan. The tree is rebuilt on `Set()` (cheap — cache
+    > is small, typically < 1000 entries due to TTL). If the cache grows beyond
+    > ~10K entries in the future, swap to an HNSW index (e.g., via a Go binding
+    > to `hnswlib`).
   - `Get(ctx context.Context, query string) (CachedEnrichment, bool)`:
     1. Normalize query (lowercase, collapse whitespace)
     2. Level 1: check exact cache by SHA256 hash → return if found and not expired
-    3. Level 2: embed query, scan semantic cache for cosine similarity ≥ threshold → return if found and not expired
+    3. Level 2: embed query, query VP-tree for nearest neighbor within threshold → return if found and not expired
     4. Return miss
   - `Set(ctx context.Context, query string, result CachedEnrichment)`:
     1. Normalize and hash query
     2. Store in exact cache
-    3. Embed query, store in semantic cache
-  - `Invalidate()` — clear both caches (called on profile update or context doc change)
-  - Background goroutine: evict expired entries every 60s
+    3. Embed query, store in semantic cache map, rebuild VP-tree index
+  - `Invalidate()` — clear both caches and reset VP-tree (called on profile update or bulk operations)
+  - `InvalidateByTopics(topics []string)` — selective invalidation: evict only cached entries whose intent topics overlap with the given topics. Falls back to full `Invalidate()` if topic matching is unavailable (e.g., cached entry has no intent metadata).
+  - Background goroutine: evict expired entries every 60s, rebuild VP-tree after eviction
 - Constructor: `NewQueryCache(embedder, enabled, semThreshold, exactTTL, semanticTTL) *QueryCache`
 - Update `internal/pipeline/enrichment.go`:
   - Add `cache *cache.QueryCache` field to `Enricher`
   - Before pipeline steps: check cache → on hit, return cached result with `meta.CacheHit = true`
-  - After pipeline completes: store result in cache
+  - After pipeline completes: store result in cache (include intent topics in `CachedEnrichment` for selective invalidation)
   - Add `CacheHit bool` and `CacheLevel string` fields to `EnrichmentMetadata`
 - Wire cache invalidation:
-  - In `internal/profile/manager.go`: on `SetField()`, call `cache.Invalidate()` (via callback or event)
-  - In ingestion handler: after storing new context doc, call `cache.Invalidate()`
+  - In `internal/profile/manager.go`: on `SetField()`, call `cache.Invalidate()` (full — profile changes affect all enrichments)
+  - In ingestion handler: after storing new context doc, call `cache.InvalidateByTopics(doc.Topics)` if topics available, else `cache.Invalidate()`
 - Config keys:
   - `enrichment.cache_enabled` (default: true)
   - `enrichment.cache_semantic_threshold` (default: 0.92)
@@ -545,6 +554,8 @@
 - `TestInvalidate` — set entries, call Invalidate(), get; verify all misses
 - `TestCacheDisabled` — create with enabled=false; set + get; verify always miss
 - `TestNormalization` — "Hello World" and "  hello  world  " should produce same cache key
+- `TestInvalidateByTopics_SelectiveEviction` — cache 2 entries with different topics; invalidate one topic; verify only the matching entry is evicted
+- `TestInvalidateByTopics_FallbackToFull` — cache entry with no topic metadata; invalidate by topics; verify full invalidation (entry evicted)
 
 **Unit tests** (`internal/pipeline/enrichment_test.go`):
 - `TestEnrich_CacheHit` — pre-populate cache; verify pipeline steps (extractor, retriever) are NOT called

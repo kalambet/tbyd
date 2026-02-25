@@ -156,7 +156,7 @@ User Query
     ▼
 [3. Intent Extraction] — local LLM call
     Input:  user query + recent conversation history
-    Output: JSON { intent_type, entities, topics, context_needs[],
+    Output: JSON { intent_type, entities, topics, context_needs,
                    search_strategy, hybrid_ratio, suggested_top_k }
     Model:  Phi-3.5-mini via Ollama
     Format: JSON schema with constrained output
@@ -411,15 +411,19 @@ A **two-level cache** avoids redundant enrichment for repeated or similar querie
 
 **Level 2 — Semantic match:**
 - Key: query embedding vector
-- Lookup: cosine similarity against cached query embeddings
+- Lookup: nearest-neighbor search via VP-tree (vantage-point tree) over cached query embeddings — O(log n), not linear scan
 - Threshold: ≥ 0.92 similarity = cache hit
-- Storage: in-memory with TTL (default: 30 minutes)
+- Storage: in-memory map + VP-tree index with TTL (default: 30 minutes)
 - Hit rate: catches rephrased queries ("what's the schema?" ≈ "tell me about the database schema")
+- VP-tree is rebuilt on insert and after eviction sweeps (cheap — cache is typically < 1000 entries due to TTL). If cache grows beyond ~10K entries, swap to HNSW index.
 
 **Invalidation:**
 - Profile update → invalidate all cached entries (profile changes affect enrichment)
-- New context document ingested → invalidate all cached entries (new context may be relevant)
+- New context document ingested → tag-based selective invalidation where feasible:
+  - If new document has topic tags, invalidate only cached queries whose intent topics overlap
+  - If no topic overlap can be determined (e.g., intent extraction was skipped), fall back to full invalidation
 - TTL expiry → automatic eviction
+- Full invalidation is always available as fallback via `Invalidate()` (called for profile changes, bulk operations, etc.)
 
 **Config:**
 - `enrichment.cache_enabled` (default: true)
@@ -969,22 +973,22 @@ After implementation, test end-to-end:
    - Register TBYD as MCP server in Claude Code settings
    - Use `recall` tool → verify it returns relevant stored context
 
-4. **Profile injection test:**
+7. **Profile injection test:**
    - Set preference "always respond in bullet points"
    - Send a query → verify cloud LLM response matches preference
 
-5. **Data sovereignty test:**
+8. **Data sovereignty test:**
    - Enable network logging (Charles Proxy / Wireshark)
    - Verify only enriched prompts reach OpenRouter, not unintended raw data
 
-6. **Bypass mode test:**
+9. **Bypass mode test:**
    - Set a request header or config flag to enable bypass (no_enrich) mode
    - Verify marked queries are forwarded to cloud unchanged, with no enrichment and no local storage
 
-7. **Localhost auth test:**
-   - Verify `POST /ingest` without bearer token returns 401
-   - Verify `POST /v1/chat/completions` works without token (OpenAI compat)
+10. **Localhost auth test:**
+    - Verify `POST /ingest` without bearer token returns 401
+    - Verify `POST /v1/chat/completions` works without token (OpenAI compat)
 
-8. **Data lifecycle test:**
-   - `tbyd data export` produces valid JSONL
-   - `tbyd data purge --confirm` removes all data; verify empty state
+11. **Data lifecycle test:**
+    - `tbyd data export` produces valid JSONL
+    - `tbyd data purge --confirm` removes all data; verify empty state
