@@ -403,7 +403,7 @@ type Reranker interface {
 
 **Behavior:**
 - Chunks below a configurable relevance threshold (default: 0.3) are dropped
-- Configurable timeout (default: 5s) with early-return: once at least `topK` chunks have been scored, return the scored subset immediately without waiting for remaining chunks. The timeout is a hard cap only when the minimum hasn't been scored yet.
+- Configurable timeout (default: 5s) with early-return: once at least `topK` chunks have been scored, return the scored subset immediately without waiting for remaining chunks. The timeout is a hard cap for the entire reranking operation — if fewer than `topK` chunks are scored before timeout, the reranker fails gracefully and returns the original unranked chunks.
 - On timeout or error, gracefully degrades to original ranking
 - Config: `enrichment.reranking_enabled` (default: true), `enrichment.reranking_timeout` (default: "5s"), `enrichment.reranking_threshold` (default: 0.3)
 

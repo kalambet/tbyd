@@ -44,7 +44,7 @@ SearchHybrid(table string, vector []float32, query string, topK int, vectorWeigh
 ```
 The `filter` parameter matches the existing `Search()` method, ensuring hybrid search can restrict by metadata (source_type, tags, topics).
 
-**Hybrid scoring:** Vector similarity and BM25 scores are independently min-max normalized, then blended with a configurable weight ratio (default: 0.7 vector / 0.3 keyword). The intent extractor drives the ratio per-query.
+**Hybrid scoring:** Scores from vector and keyword search are fused using Reciprocal Rank Fusion (RRF) by default, which uses rank positions only and is robust to BM25's unbounded score range. Weighted min-max blending is available as an alternative via config (`retrieval.fusion_method`). The intent extractor can drive the vector/keyword weight ratio per-query.
 
 ### Why This Matters Before LanceDB
 
