@@ -370,8 +370,8 @@
 - Implement `SearchHybrid` on `SQLiteStore`:
   - Run vector search and keyword search in parallel (goroutines)
   - Score fusion (configurable via `retrieval.fusion_method`):
-    - **"weighted"** (default): min-max normalize each signal to 0–1, blend: `final_score = vectorWeight * vector_score + (1 - vectorWeight) * keyword_score`
-    - **"rrf"** (Reciprocal Rank Fusion): `score = 1/(k + vector_rank) + 1/(k + keyword_rank)` with k=60. More robust to outlier scores; uses rank positions only.
+    - **"rrf"** (default, Reciprocal Rank Fusion): `score = 1/(k + vector_rank) + 1/(k + keyword_rank)` with k=60. Uses rank positions only — robust to outlier scores and stable across unbounded BM25 score ranges.
+    - **"weighted"**: min-max normalize each signal to 0–1 per-query (using min/max from the current result set), blend: `final_score = vectorWeight * vector_score + (1 - vectorWeight) * keyword_score`. More interpretable but sensitive to outliers since BM25 scores are unbounded.
   - Deduplicate by record ID, keep highest fused score
   - Return top-K sorted by fused score
 - Extend `Intent` struct in `internal/intent/extractor.go`:
@@ -463,7 +463,7 @@
 - `TestLLMReranker_ReordersChunks` — mock returns scores [0.9, 0.3, 0.7] for 3 chunks; verify output order is [0.9, 0.7, 0.3]
 - `TestLLMReranker_DropsLowScore` — mock returns score 0.1 for one chunk (below threshold 0.3); verify chunk is dropped
 - `TestLLMReranker_Timeout` — create reranker with 2s timeout; mock hangs; verify function returns within 2.5s with original chunks (graceful degradation)
-- `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk gets a default score (not dropped, not crash)
+- `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk retains its original retrieval score (not dropped, not 0.0, not crash). Preserving the original score is safer than penalizing a chunk just because the reranker failed to parse its response.
 - `TestLLMReranker_EarlyReturn` — 10 chunks, mock scores 5 quickly and hangs on the rest; verify function returns the 5 scored chunks without waiting for timeout
 - `TestLLMReranker_EmptyChunks` — pass empty slice; verify empty slice returned (no error)
 - `TestNoOpReranker` — verify chunks returned in original order unchanged
@@ -539,7 +539,11 @@
     2. Store in exact cache
     3. Store pre-computed embedding in semantic cache map, mark VP-tree as dirty (lazy rebuild on next `Get()`)
   - `Invalidate()` — clear both caches and reset VP-tree (called on profile update or bulk operations)
-  - `InvalidateByTopics(topics []string)` — selective invalidation: evict only cached entries whose intent topics overlap with the given topics. Falls back to full `Invalidate()` if topic matching is unavailable (e.g., cached entry has no intent metadata).
+  - `InvalidateByTopics(topics []string)` — selective invalidation:
+    1. Evict cached entries whose intent topics overlap with the given topics
+    2. Evict cached entries that have no topic metadata (since we can't determine if they're affected)
+    3. Preserve cached entries with topic metadata that does NOT overlap (known-safe)
+    This is more precise than full invalidation — entries with clear, non-overlapping topics remain cached.
   - Background goroutine: evict expired entries every 60s; if entries were evicted and tree was already dirty, rebuild VP-tree
 - Constructor: `NewQueryCache(embedder, enabled, semThreshold, exactTTL, semanticTTL) *QueryCache`
 - Update `internal/pipeline/enrichment.go`:
@@ -568,8 +572,9 @@
 - `TestInvalidate` — set entries, call Invalidate(), get; verify all misses
 - `TestCacheDisabled` — create with enabled=false; set + get; verify always miss
 - `TestNormalization` — "Hello World" and "  hello  world  " should produce same cache key
-- `TestInvalidateByTopics_SelectiveEviction` — cache 2 entries with different topics; invalidate one topic; verify only the matching entry is evicted
-- `TestInvalidateByTopics_FallbackToFull` — cache entry with no topic metadata; invalidate by topics; verify full invalidation (entry evicted)
+- `TestInvalidateByTopics_SelectiveEviction` — cache 2 entries with different topics; invalidate one topic; verify only the matching entry is evicted, non-matching entry preserved
+- `TestInvalidateByTopics_NoMetadataEvicted` — cache entry with no topic metadata; invalidate by topics; verify the no-metadata entry is evicted (can't prove it's safe)
+- `TestInvalidateByTopics_PreservesKnownSafe` — cache 3 entries: one matching topic, one non-matching topic, one with no metadata; invalidate by topic; verify matching + no-metadata evicted, non-matching preserved
 
 **Unit tests** (`internal/pipeline/enrichment_test.go`):
 - `TestEnrich_CacheHit` — pre-populate cache; verify pipeline steps (extractor, retriever) are NOT called

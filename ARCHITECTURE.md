@@ -370,9 +370,9 @@ The context retrieval pipeline uses a **hybrid search** strategy combining vecto
 - Conceptual queries (e.g., "how should I approach testing?") → vector-heavy blend (ratio ~0.8 vector / 0.2 keyword)
 - Default: 0.7 vector / 0.3 keyword when intent extraction fails or doesn't specify
 - Score fusion method (configurable):
-  - **Min-max normalization + weighted blend** (default): normalize each signal to 0–1, then blend. Simple and interpretable, but sensitive to outlier scores.
-  - **Reciprocal Rank Fusion (RRF)**: `score = Σ 1/(k + rank_i)` where k=60 (standard constant). More robust to outliers, only uses rank positions not raw scores. Preferred when score distributions vary significantly between vector and keyword search.
-- Config: `retrieval.fusion_method` ("weighted" | "rrf", default: "weighted")
+  - **Reciprocal Rank Fusion (RRF)** (default): `score = Σ 1/(k + rank_i)` where k=60 (standard constant). Uses rank positions only — robust to outliers and stable across unbounded BM25 score ranges. Default because BM25 scores are unbounded, making raw score normalization unreliable.
+  - **Min-max normalization + weighted blend**: normalize each signal to 0–1 per-query, then blend. Simple and interpretable, but sensitive to outlier scores.
+- Config: `retrieval.fusion_method` ("rrf" | "weighted", default: "rrf")
 
 **FTS5 schema:**
 ```sql
@@ -426,9 +426,10 @@ A **two-level cache** avoids redundant enrichment for repeated or similar querie
 
 **Invalidation:**
 - Profile update → invalidate all cached entries (profile changes affect enrichment)
-- New context document ingested → tag-based selective invalidation where feasible:
-  - If new document has topic tags, invalidate only cached queries whose intent topics overlap
-  - If no topic overlap can be determined (e.g., intent extraction was skipped), fall back to full invalidation
+- New context document ingested → tag-based selective invalidation:
+  - Evict cached queries whose intent topics overlap with the new document's topics
+  - Evict cached queries with no topic metadata (can't prove they're unaffected)
+  - Preserve cached queries with non-overlapping topic metadata (known-safe)
 - TTL expiry → automatic eviction
 - Full invalidation is always available as fallback via `Invalidate()` (called for profile changes, bulk operations, etc.)
 
