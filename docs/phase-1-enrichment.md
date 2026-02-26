@@ -339,23 +339,33 @@
 - Add SQLite FTS5 virtual table for keyword search:
   - Create migration `XXX_add_fts5.sql`:
     ```sql
+    -- Contentless FTS5: stores its own inverted index, no rowid dependency.
+    -- This avoids the data integrity risk of content-sync mode: since
+    -- context_vectors uses TEXT PRIMARY KEY, implicit rowids are unstable
+    -- across VACUUM. Contentless mode eliminates that coupling entirely.
     CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+        doc_id,
         text_chunk,
-        content='context_vectors',
-        content_rowid='rowid'
+        content=''
     );
-    -- Triggers to keep FTS index in sync with context_vectors
+    -- Triggers keep FTS index in sync via the stable TEXT id, not rowid.
     CREATE TRIGGER context_vectors_ai AFTER INSERT ON context_vectors BEGIN
-        INSERT INTO context_vectors_fts(rowid, text_chunk) VALUES (new.rowid, new.text_chunk);
+        INSERT INTO context_vectors_fts(doc_id, text_chunk) VALUES (new.id, new.text_chunk);
     END;
     CREATE TRIGGER context_vectors_ad AFTER DELETE ON context_vectors BEGIN
-        INSERT INTO context_vectors_fts(context_vectors_fts, rowid, text_chunk) VALUES('delete', old.rowid, old.text_chunk);
+        INSERT INTO context_vectors_fts(context_vectors_fts, doc_id, text_chunk) VALUES('delete', old.id, old.text_chunk);
     END;
     CREATE TRIGGER context_vectors_au AFTER UPDATE ON context_vectors BEGIN
-        INSERT INTO context_vectors_fts(context_vectors_fts, rowid, text_chunk) VALUES('delete', old.rowid, old.text_chunk);
-        INSERT INTO context_vectors_fts(rowid, text_chunk) VALUES (new.rowid, new.text_chunk);
+        INSERT INTO context_vectors_fts(context_vectors_fts, doc_id, text_chunk) VALUES('delete', old.id, old.text_chunk);
+        INSERT INTO context_vectors_fts(doc_id, text_chunk) VALUES (new.id, new.text_chunk);
     END;
     ```
+    > **Why contentless (`content=''`):** The `context_vectors` table uses `id TEXT PRIMARY KEY`,
+    > meaning implicit `rowid` values are auto-assigned integers that can be renumbered by
+    > `VACUUM`. Content-sync mode (`content='context_vectors', content_rowid='rowid'`) would
+    > break after a VACUUM because the FTS index would point to stale rowids. Contentless mode
+    > avoids this entirely — FTS5 maintains its own inverted index and we store the stable
+    > `doc_id` (the TEXT primary key) alongside each entry for joining back to `context_vectors`.
   - Backfill: migration populates FTS from existing `context_vectors` rows
 - Extend `VectorStore` interface in `internal/retrieval/vectorstore.go`:
   ```go
@@ -364,8 +374,8 @@
   ```
   > The `filter` parameter matches the existing `Search()` signature. This ensures hybrid search can restrict results by `source_type`, `tags`, or `intent.Topics` — without it, hybrid search would be a functional regression over vector-only search which already accepts filters.
 - Implement `SearchKeyword` on `SQLiteStore`:
-  - Query FTS5: `SELECT rowid, rank FROM context_vectors_fts WHERE text_chunk MATCH ? ORDER BY rank LIMIT ?`
-  - Fetch full records by rowid
+  - Query FTS5: `SELECT doc_id, rank FROM context_vectors_fts WHERE text_chunk MATCH ? ORDER BY rank LIMIT ?`
+  - Fetch full records from `context_vectors` by `doc_id` (the stable TEXT primary key)
   - Normalize BM25 scores to 0–1 range (min-max normalization)
 - Implement `SearchHybrid` on `SQLiteStore`:
   - Run vector search and keyword search in parallel (goroutines)
@@ -435,6 +445,12 @@
       Text: {chunk.Text}
       Respond with only a JSON object: {"score": <float>}
       ```
+    - Use Ollama's `format: "json"` option to request structured JSON output
+    - **Robust JSON extraction:** Small local models (phi3.5) frequently wrap JSON in markdown code fences (`` ```json ... ``` ``) or add conversational filler. The parser must:
+      1. Strip markdown code fences if present (`\x60\x60\x60json ... \x60\x60\x60`)
+      2. Find the first `{` and last `}` in the response to extract the JSON object
+      3. Attempt `json.Unmarshal` on the extracted substring
+      4. On failure: retain the chunk's original retrieval score (do not drop or penalize)
     - Batches scoring calls concurrently (bounded concurrency, e.g., 3 at a time)
     - Timeout: configurable, default 5s total (not per-chunk). Uses early-return: once at least `topK` chunks have been scored (e.g., 5 of 10), return the scored subset immediately without waiting for remaining chunks. The timeout is only a hard cap for the case where even the minimum hasn't been scored yet.
     - Re-sorts chunks by reranker score descending
@@ -463,7 +479,9 @@
 - `TestLLMReranker_ReordersChunks` — mock returns scores [0.9, 0.3, 0.7] for 3 chunks; verify output order is [0.9, 0.7, 0.3]
 - `TestLLMReranker_DropsLowScore` — mock returns score 0.1 for one chunk (below threshold 0.3); verify chunk is dropped
 - `TestLLMReranker_Timeout` — create reranker with 2s timeout; mock hangs; verify function returns within 2.5s with original chunks (graceful degradation)
-- `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk retains its original retrieval score (not dropped, not 0.0, not crash). Preserving the original score is safer than penalizing a chunk just because the reranker failed to parse its response.
+- `TestLLMReranker_MarkdownCodeFence` — mock returns `` ```json\n{"score": 0.8}\n``` ``; verify JSON extracted correctly and score parsed as 0.8
+- `TestLLMReranker_ConversationalFiller` — mock returns `"The relevance score is: {"score": 0.6}"`; verify JSON extracted from first `{` to last `}` and score parsed
+- `TestLLMReranker_MalformedJSON` — mock returns completely unparseable text; verify chunk retains its original retrieval score (not dropped, not 0.0, not crash)
 - `TestLLMReranker_EarlyReturn` — 10 chunks, mock scores 5 quickly and hangs on the rest; verify function returns the 5 scored chunks without waiting for timeout
 - `TestLLMReranker_EmptyChunks` — pass empty slice; verify empty slice returned (no error)
 - `TestNoOpReranker` — verify chunks returned in original order unchanged
@@ -494,8 +512,7 @@
     type QueryCache struct {
         mu             sync.RWMutex
         exactCache     map[string]CachedEnrichment       // SHA256(normalized_query) → result
-        semanticCache  map[string]SemanticEntry           // query hash → embedding + result
-        semanticIndex  *VPTree                            // vantage-point tree for ANN lookup
+        semanticCache  []SemanticEntry                    // query embeddings + results
         embedder       retrieval.Embedder
         enabled        bool
         semThreshold   float64        // cosine similarity threshold for L2 hit (default 0.92)
@@ -516,35 +533,33 @@
         CachedAt   time.Time
     }
     ```
-    > **Scaling note:** The semantic cache uses a vantage-point tree (VP-tree) for
-    > O(log n) nearest-neighbor lookup instead of linear scanning. A VP-tree is
-    > simple to implement for cosine distance over 768-d embeddings and avoids the
-    > O(n) bottleneck of a slice scan.
+    > **Phase 1 approach:** The semantic cache uses a simple linear scan over the
+    > `[]SemanticEntry` slice, computing cosine similarity for each cached embedding.
+    > For a single-user local tool, cache size is bounded by TTL (30 min) and
+    > invalidation, keeping it well under ~5K entries. At this scale, a linear scan
+    > of 768-d float32 vectors takes microseconds on modern CPUs — far below the
+    > noise floor of the LLM calls that dominate latency.
     >
-    > **Lazy rebuild:** The tree is NOT rebuilt on every `Set()` — that would be
-    > O(N) per insert and a bottleneck during bulk operations. Instead, `Set()`
-    > marks the tree as dirty. The tree is rebuilt lazily on the next `Get()` that
-    > requires an L2 lookup, amortizing the cost. The background eviction goroutine
-    > also rebuilds if the tree is dirty after evicting expired entries.
-    >
-    > If the cache grows beyond ~10K entries in the future, swap to an HNSW index
-    > (e.g., via a Go binding to `hnswlib`).
+    > **Future:** If the cache grows beyond ~10K entries (e.g., multi-user or very
+    > long TTLs), swap to an ANN index (VP-tree or HNSW via a Go binding to
+    > `hnswlib`). The `[]SemanticEntry` can be replaced without changing the
+    > `Get()`/`Set()` API.
   - `Get(ctx context.Context, query string) (CachedEnrichment, []float32, bool)`:
     1. Normalize query (lowercase, collapse whitespace)
     2. Level 1: check exact cache by SHA256 hash → return if found and not expired
-    3. Level 2: embed query **once**, query VP-tree for nearest neighbor within threshold → return if found and not expired
+    3. Level 2: embed query **once**, linear scan semantic cache for cosine similarity ≥ threshold → return if found and not expired
     4. On miss: return the pre-computed embedding as second return value so the caller can reuse it for retrieval (avoids re-embedding the same query)
   - `Set(ctx context.Context, query string, queryEmbedding []float32, result CachedEnrichment)`:
     1. Normalize and hash query
     2. Store in exact cache
-    3. Store pre-computed embedding in semantic cache map, mark VP-tree as dirty (lazy rebuild on next `Get()`)
-  - `Invalidate()` — clear both caches and reset VP-tree (called on profile update or bulk operations)
+    3. Append pre-computed embedding + result to semantic cache slice
+  - `Invalidate()` — clear both caches (called on profile update or bulk operations)
   - `InvalidateByTopics(topics []string)` — selective invalidation:
     1. Evict cached entries whose intent topics overlap with the given topics
     2. Evict cached entries that have no topic metadata (since we can't determine if they're affected)
     3. Preserve cached entries with topic metadata that does NOT overlap (known-safe)
     This is more precise than full invalidation — entries with clear, non-overlapping topics remain cached.
-  - Background goroutine: evict expired entries every 60s; if entries were evicted and tree was already dirty, rebuild VP-tree
+  - Background goroutine: evict expired entries every 60s
 - Constructor: `NewQueryCache(embedder, enabled, semThreshold, exactTTL, semanticTTL) *QueryCache`
 - Update `internal/pipeline/enrichment.go`:
   - Add `cache *cache.QueryCache` field to `Enricher`

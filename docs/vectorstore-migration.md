@@ -27,15 +27,15 @@ Before migrating to LanceDB, the SQLite backend gains **hybrid search** (BM25 + 
 
 ### What Changes
 
-**FTS5 virtual table** added alongside the existing `context_vectors` table:
+**FTS5 virtual table** added alongside the existing `context_vectors` table (contentless mode — no rowid dependency):
 ```sql
 CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+    doc_id,
     text_chunk,
-    content='context_vectors',
-    content_rowid='rowid'
+    content=''
 );
 ```
-Triggers keep the FTS index in sync with inserts, deletes, and updates on `context_vectors`.
+Contentless mode (`content=''`) avoids the rowid instability risk: since `context_vectors` uses `id TEXT PRIMARY KEY`, implicit rowids can be renumbered by `VACUUM`. The `doc_id` column stores the stable TEXT primary key for joining back to `context_vectors`. Triggers keep the FTS index in sync with inserts, deletes, and updates.
 
 **New VectorStore methods:**
 ```go

@@ -374,14 +374,15 @@ The context retrieval pipeline uses a **hybrid search** strategy combining vecto
   - **Min-max normalization + weighted blend**: normalize each signal to 0–1 per-query, then blend. Simple and interpretable, but sensitive to outlier scores.
 - Config: `retrieval.fusion_method` ("rrf" | "weighted", default: "rrf")
 
-**FTS5 schema:**
+**FTS5 schema (contentless — no rowid dependency):**
 ```sql
 CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+    doc_id,
     text_chunk,
-    content='context_vectors',
-    content_rowid='rowid'
+    content=''
 );
 ```
+Contentless mode avoids rowid instability: `context_vectors` uses `id TEXT PRIMARY KEY`, so implicit rowids can shift on `VACUUM`. The `doc_id` column stores the stable text ID for joining back.
 
 ### Reranking
 
@@ -418,11 +419,11 @@ A **two-level cache** avoids redundant enrichment for repeated or similar querie
 
 **Level 2 — Semantic match:**
 - Key: query embedding vector
-- Lookup: nearest-neighbor search via VP-tree (vantage-point tree) over cached query embeddings — O(log n), not linear scan
+- Lookup: linear scan over cached query embeddings, computing cosine similarity for each. At typical cache sizes (<5K entries), this takes microseconds on modern CPUs — far below LLM call latency.
 - Threshold: ≥ 0.92 similarity = cache hit
-- Storage: in-memory map + VP-tree index with TTL (default: 30 minutes)
+- Storage: in-memory slice with TTL (default: 30 minutes)
 - Hit rate: catches rephrased queries ("what's the schema?" ≈ "tell me about the database schema")
-- VP-tree is rebuilt on insert and after eviction sweeps (cheap — cache is typically < 1000 entries due to TTL). If cache grows beyond ~10K entries, swap to HNSW index.
+- Future: if cache grows beyond ~10K entries, swap to an ANN index (VP-tree or HNSW).
 
 **Invalidation:**
 - Profile update → invalidate all cached entries (profile changes affect enrichment)
