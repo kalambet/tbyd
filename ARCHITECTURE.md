@@ -403,9 +403,9 @@ type Reranker interface {
 
 **Behavior:**
 - Chunks below a configurable relevance threshold (default: 0.3) are dropped
-- Configurable timeout (default: 10s) — with bounded concurrency of 3 and ~1s per LLM call, covers ~30 chunk evaluations
+- Configurable timeout (default: 5s) with early-return: once at least `topK` chunks have been scored, return the scored subset immediately without waiting for remaining chunks. The timeout is a hard cap only when the minimum hasn't been scored yet.
 - On timeout or error, gracefully degrades to original ranking
-- Config: `enrichment.reranking_enabled` (default: true), `enrichment.reranking_timeout` (default: "10s"), `enrichment.reranking_threshold` (default: 0.3)
+- Config: `enrichment.reranking_enabled` (default: true), `enrichment.reranking_timeout` (default: "5s"), `enrichment.reranking_threshold` (default: 0.3)
 
 ### Query Cache
 

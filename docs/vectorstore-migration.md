@@ -39,9 +39,10 @@ Triggers keep the FTS index in sync with inserts, deletes, and updates on `conte
 
 **New VectorStore methods:**
 ```go
-SearchKeyword(table string, query string, topK int) ([]ScoredRecord, error)
-SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32) ([]ScoredRecord, error)
+SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error)
+SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
 ```
+The `filter` parameter matches the existing `Search()` method, ensuring hybrid search can restrict by metadata (source_type, tags, topics).
 
 **Hybrid scoring:** Vector similarity and BM25 scores are independently min-max normalized, then blended with a configurable weight ratio (default: 0.7 vector / 0.3 keyword). The intent extractor drives the ratio per-query.
 

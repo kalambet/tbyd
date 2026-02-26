@@ -359,9 +359,10 @@
   - Backfill: migration populates FTS from existing `context_vectors` rows
 - Extend `VectorStore` interface in `internal/retrieval/vectorstore.go`:
   ```go
-  SearchKeyword(table string, query string, topK int) ([]ScoredRecord, error)
-  SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32) ([]ScoredRecord, error)
+  SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error)
+  SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
   ```
+  > The `filter` parameter matches the existing `Search()` signature. This ensures hybrid search can restrict results by `source_type`, `tags`, or `intent.Topics` — without it, hybrid search would be a functional regression over vector-only search which already accepts filters.
 - Implement `SearchKeyword` on `SQLiteStore`:
   - Query FTS5: `SELECT rowid, rank FROM context_vectors_fts WHERE text_chunk MATCH ? ORDER BY rank LIMIT ?`
   - Fetch full records by rowid
@@ -435,7 +436,7 @@
       Respond with only a JSON object: {"score": <float>}
       ```
     - Batches scoring calls concurrently (bounded concurrency, e.g., 3 at a time)
-    - Timeout: configurable, default 10s total for all chunks (not per-chunk). With bounded concurrency of 3 and ~1s per LLM call, 10s covers ~30 chunk evaluations. Adjust via config for slower hardware.
+    - Timeout: configurable, default 5s total (not per-chunk). Uses early-return: once at least `topK` chunks have been scored (e.g., 5 of 10), return the scored subset immediately without waiting for remaining chunks. The timeout is only a hard cap for the case where even the minimum hasn't been scored yet.
     - Re-sorts chunks by reranker score descending
     - Drops chunks with score < threshold (default: 0.3, configurable)
   - `NoOpReranker` — returns chunks unchanged (passthrough)
@@ -455,7 +456,7 @@
   - Track reranking duration in `EnrichmentMetadata`
 - Config keys:
   - `enrichment.reranking_enabled` (default: true)
-  - `enrichment.reranking_timeout` (default: "10s")
+  - `enrichment.reranking_timeout` (default: "5s")
   - `enrichment.reranking_threshold` (default: 0.3)
 
 **Unit tests** (`internal/reranking/reranker_test.go`) — mock `engine.Engine`:
@@ -463,6 +464,7 @@
 - `TestLLMReranker_DropsLowScore` — mock returns score 0.1 for one chunk (below threshold 0.3); verify chunk is dropped
 - `TestLLMReranker_Timeout` — create reranker with 2s timeout; mock hangs; verify function returns within 2.5s with original chunks (graceful degradation)
 - `TestLLMReranker_MalformedJSON` — mock returns invalid JSON for one chunk; verify chunk gets a default score (not dropped, not crash)
+- `TestLLMReranker_EarlyReturn` — 10 chunks, mock scores 5 quickly and hangs on the rest; verify function returns the 5 scored chunks without waiting for timeout
 - `TestLLMReranker_EmptyChunks` — pass empty slice; verify empty slice returned (no error)
 - `TestNoOpReranker` — verify chunks returned in original order unchanged
 - `TestNewReranker_Enabled` — verify returns `*LLMReranker`
@@ -517,10 +519,16 @@
     > **Scaling note:** The semantic cache uses a vantage-point tree (VP-tree) for
     > O(log n) nearest-neighbor lookup instead of linear scanning. A VP-tree is
     > simple to implement for cosine distance over 768-d embeddings and avoids the
-    > O(n) bottleneck of a slice scan. The tree is rebuilt on `Set()` (cheap — cache
-    > is small, typically < 1000 entries due to TTL). If the cache grows beyond
-    > ~10K entries in the future, swap to an HNSW index (e.g., via a Go binding
-    > to `hnswlib`).
+    > O(n) bottleneck of a slice scan.
+    >
+    > **Lazy rebuild:** The tree is NOT rebuilt on every `Set()` — that would be
+    > O(N) per insert and a bottleneck during bulk operations. Instead, `Set()`
+    > marks the tree as dirty. The tree is rebuilt lazily on the next `Get()` that
+    > requires an L2 lookup, amortizing the cost. The background eviction goroutine
+    > also rebuilds if the tree is dirty after evicting expired entries.
+    >
+    > If the cache grows beyond ~10K entries in the future, swap to an HNSW index
+    > (e.g., via a Go binding to `hnswlib`).
   - `Get(ctx context.Context, query string) (CachedEnrichment, []float32, bool)`:
     1. Normalize query (lowercase, collapse whitespace)
     2. Level 1: check exact cache by SHA256 hash → return if found and not expired
@@ -529,10 +537,10 @@
   - `Set(ctx context.Context, query string, queryEmbedding []float32, result CachedEnrichment)`:
     1. Normalize and hash query
     2. Store in exact cache
-    3. Store pre-computed embedding in semantic cache map, rebuild VP-tree index
+    3. Store pre-computed embedding in semantic cache map, mark VP-tree as dirty (lazy rebuild on next `Get()`)
   - `Invalidate()` — clear both caches and reset VP-tree (called on profile update or bulk operations)
   - `InvalidateByTopics(topics []string)` — selective invalidation: evict only cached entries whose intent topics overlap with the given topics. Falls back to full `Invalidate()` if topic matching is unavailable (e.g., cached entry has no intent metadata).
-  - Background goroutine: evict expired entries every 60s, rebuild VP-tree after eviction
+  - Background goroutine: evict expired entries every 60s; if entries were evicted and tree was already dirty, rebuild VP-tree
 - Constructor: `NewQueryCache(embedder, enabled, semThreshold, exactTTL, semanticTTL) *QueryCache`
 - Update `internal/pipeline/enrichment.go`:
   - Add `cache *cache.QueryCache` field to `Enricher`
