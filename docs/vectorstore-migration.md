@@ -21,6 +21,38 @@ Consider migrating when:
 - **No ANN indexes**: brute-force scan means latency grows linearly with vector count.
 - **Single embedding dimension**: hardcoded to 768-d (`nomic-embed-text`). Changing models requires re-embedding all stored vectors.
 
+## Intermediate Step: Hybrid Search on SQLite (Phase 1)
+
+Before migrating to LanceDB, the SQLite backend gains **hybrid search** (BM25 + vector) using SQLite FTS5. This is a no-new-dependency improvement that substantially improves retrieval quality, especially for entity-heavy and technical queries.
+
+### What Changes
+
+**FTS5 virtual table** added alongside the existing `context_vectors` table (contentless mode — no rowid dependency):
+```sql
+CREATE VIRTUAL TABLE context_vectors_fts USING fts5(
+    doc_id,
+    text_chunk,
+    content=''
+);
+```
+Contentless mode (`content=''`) avoids the rowid instability risk: since `context_vectors` uses `id TEXT PRIMARY KEY`, implicit rowids can be renumbered by `VACUUM`. The `doc_id` column stores the stable TEXT primary key for joining back to `context_vectors`. Triggers keep the FTS index in sync with inserts, deletes, and updates.
+
+**New VectorStore methods:**
+```go
+SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error)
+SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
+```
+The `filter` parameter matches the existing `Search()` method, ensuring hybrid search can restrict by metadata (source_type, tags, topics).
+
+**Hybrid scoring:** Scores from vector and keyword search are fused using Reciprocal Rank Fusion (RRF) by default, which uses rank positions only and is robust to BM25's unbounded score range. Weighted min-max blending is available as an alternative via config (`retrieval.fusion_method`). The intent extractor can drive the vector/keyword weight ratio per-query.
+
+### Why This Matters Before LanceDB
+
+- **Immediate quality gain**: entity names, proper nouns, and technical terms that embed poorly are caught by BM25 keyword matching
+- **No new dependencies**: FTS5 is built into SQLite — no Rust sidecar, no new binary
+- **Forward-compatible**: when LanceDB migration happens, hybrid search transfers naturally since LanceDB has built-in full-text search alongside vector search
+- **Low risk**: existing vector-only `Search()` method unchanged; hybrid search is additive
+
 ## Architecture
 
 All vector operations go through the `VectorStore` interface:
@@ -128,5 +160,7 @@ Launch the Rust sidecar from the Go binary, similar to Ollama lifecycle manageme
 - **ANN indexes**: HNSW, IVF-PQ, IVF-Flat for sub-10ms search at 1M+ vectors
 - **DataFusion SQL**: rich metadata filtering without custom parsing
 - **Scalar indexes**: BTree, Bitmap for fast filter pre-screening
-- **Full-text search**: built-in FTS alongside vector search
+- **Full-text search**: built-in FTS alongside vector search (replaces SQLite FTS5; hybrid search logic transfers directly)
 - **Lance format**: columnar, versioned, optimized for ML workloads
+
+Note: The hybrid search architecture (VectorStore interface with `SearchHybrid` method) is designed to be backend-agnostic. When migrating to LanceDB, implement `SearchHybrid` on `LanceDBStore` using LanceDB's native full-text + vector search — the `Retriever` and pipeline code require no changes.
