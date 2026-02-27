@@ -28,6 +28,7 @@ import (
 	"github.com/kalambet/tbyd/internal/pipeline"
 	"github.com/kalambet/tbyd/internal/profile"
 	"github.com/kalambet/tbyd/internal/proxy"
+	"github.com/kalambet/tbyd/internal/reranking"
 	"github.com/kalambet/tbyd/internal/retrieval"
 	"github.com/kalambet/tbyd/internal/storage"
 )
@@ -149,7 +150,20 @@ func runServer() error {
 	retriever := retrieval.NewRetriever(embedder, vectorStore)
 	profileMgr := profile.NewManager(store)
 	comp := composer.New(0)
-	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, cfg.Retrieval.TopK)
+	rerankTimeout, err := time.ParseDuration(cfg.Enrichment.RerankingTimeout)
+	if err != nil {
+		slog.Warn("invalid reranking timeout, using default 5s", "value", cfg.Enrichment.RerankingTimeout, "error", err)
+		rerankTimeout = 5 * time.Second
+	}
+	reranker := reranking.NewReranker(
+		ollamaEngine,
+		cfg.Ollama.FastModel,
+		cfg.Enrichment.RerankingEnabled,
+		rerankTimeout,
+		cfg.Enrichment.RerankingThreshold,
+		cfg.Retrieval.TopK,
+	)
+	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, reranker, cfg.Retrieval.TopK)
 
 	// Retrieve API token for bearer auth on management endpoints.
 	apiToken, err := config.GetAPIToken(config.NewKeychain())

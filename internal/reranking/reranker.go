@@ -1,0 +1,216 @@
+package reranking
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/kalambet/tbyd/internal/engine"
+	"github.com/kalambet/tbyd/internal/retrieval"
+)
+
+const defaultConcurrency = 3
+
+// Reranker re-scores retrieved context chunks by query relevance.
+type Reranker interface {
+	Rerank(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error)
+}
+
+// NewReranker returns an LLMReranker if enabled, NoOpReranker otherwise.
+// Falls back to NoOpReranker if enabled is true but eng is nil.
+//
+// topK controls the early-return threshold: once topK chunks have been scored,
+// the reranker returns that subset immediately without waiting for remaining
+// chunks. Set topK to 0 (or >= len(chunks)) to disable early return.
+func NewReranker(eng engine.Engine, model string, enabled bool, timeout time.Duration, threshold float64, topK int) Reranker {
+	if !enabled || eng == nil {
+		if enabled && eng == nil {
+			slog.Warn("reranker: enabled but engine is nil, falling back to no-op")
+		}
+		return &NoOpReranker{}
+	}
+	return &LLMReranker{
+		engine:    eng,
+		model:     model,
+		timeout:   timeout,
+		threshold: threshold,
+		topK:      topK,
+	}
+}
+
+// LLMReranker uses a local LLM to score (query, chunk) relevance pairs.
+// Scoring runs concurrently (bounded to defaultConcurrency goroutines).
+// Results are filtered by threshold and sorted by score descending.
+type LLMReranker struct {
+	engine    engine.Engine
+	model     string
+	timeout   time.Duration
+	threshold float64
+	topK      int // early-return threshold; 0 = score all
+}
+
+// Rerank scores each chunk against the query and returns a filtered, sorted
+// result set. Returns an error if the timeout fires before enough chunks are
+// scored; the caller is expected to fall back to the original order.
+func (r *LLMReranker) Rerank(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
+	if len(chunks) == 0 {
+		return chunks, nil
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	// Early return fires when topK > 0 and topK < len(chunks).
+	earlyReturnAt := r.topK
+	if earlyReturnAt <= 0 || earlyReturnAt >= len(chunks) {
+		earlyReturnAt = 0
+	}
+
+	// Buffered channel prevents goroutines from blocking on send after we stop reading.
+	results := make(chan retrieval.ContextChunk, len(chunks))
+	sem := make(chan struct{}, defaultConcurrency)
+
+	var wg sync.WaitGroup
+	for _, ch := range chunks {
+		wg.Add(1)
+		go func(chunk retrieval.ContextChunk) {
+			defer wg.Done()
+			// Acquire concurrency slot or bail on cancellation.
+			select {
+			case sem <- struct{}{}:
+			case <-timeoutCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			score := r.scoreChunk(timeoutCtx, query, chunk)
+			if timeoutCtx.Err() != nil {
+				return // context cancelled during scoring — don't send result
+			}
+			chunk.Score = float32(score)
+			results <- chunk
+		}(ch)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	scored := make([]retrieval.ContextChunk, 0, len(chunks))
+collect:
+	for {
+		select {
+		case ch, ok := <-results:
+			if !ok {
+				break collect // all goroutines finished
+			}
+			scored = append(scored, ch)
+			if earlyReturnAt > 0 && len(scored) >= earlyReturnAt {
+				cancel() // stop remaining goroutines
+				break collect
+			}
+		case <-timeoutCtx.Done():
+			// Hard timeout: signal failure so the caller can log and fall back.
+			return nil, fmt.Errorf("reranking timed out after %s", r.timeout)
+		}
+	}
+
+	// Filter chunks below the relevance threshold.
+	filtered := make([]retrieval.ContextChunk, 0, len(scored))
+	for _, ch := range scored {
+		if float64(ch.Score) >= r.threshold {
+			filtered = append(filtered, ch)
+		}
+	}
+
+	// Sort by score descending.
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Score > filtered[j].Score
+	})
+
+	return filtered, nil
+}
+
+// scoreChunk asks the LLM to rate the relevance of chunk to query.
+// Always returns a score: the LLM-provided value on success, or the chunk's
+// original retrieval score on any failure (chat error or parse error).
+func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrieval.ContextChunk) float64 {
+	prompt := "Rate the relevance of the following text to the query on a scale of 0.0 to 1.0.\n" +
+		"Query: " + query + "\n" +
+		"Text: " + chunk.Text + "\n" +
+		`Respond with only a JSON object: {"score": <float>}`
+
+	schema := &engine.Schema{
+		Type: "object",
+		Properties: map[string]engine.SchemaProperty{
+			"score": {Type: "number", Description: "Relevance score 0.0–1.0"},
+		},
+		Required: []string{"score"},
+	}
+
+	resp, err := r.engine.Chat(ctx, r.model, []engine.Message{
+		{Role: "user", Content: prompt},
+	}, schema)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Debug("reranker: chat failed, retaining original score", "error", err)
+		}
+		return float64(chunk.Score)
+	}
+
+	score, parseErr := parseScore(resp, chunk.Score)
+	if parseErr != nil {
+		slog.Debug("reranker: parse failed, using original score", "resp", resp, "error", parseErr)
+		return float64(chunk.Score)
+	}
+	return score
+}
+
+// parseScore robustly extracts a relevance score float from an LLM response.
+// Small local models (phi3.5) frequently wrap JSON in markdown code fences or
+// prepend conversational filler. The parser:
+//  1. Strips markdown code fences if present (```json ... ```)
+//  2. Finds the first { and last } to extract the JSON object
+//  3. Attempts json.Unmarshal on the extracted substring
+//  4. On failure: returns originalScore so the chunk is not penalised
+func parseScore(resp string, originalScore float32) (float64, error) {
+	s := strings.TrimSpace(resp)
+
+	// Strip markdown code fences if present. Skip the optional language tag
+	// (e.g. "json", "JSON") and let the brace-finding logic below handle parsing.
+	if idx := strings.Index(s, "```"); idx != -1 {
+		content := s[idx+3:]
+		if end := strings.Index(content, "```"); end != -1 {
+			content = content[:end]
+		}
+		s = content
+	}
+
+	// Extract JSON object by brace position.
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start == -1 || end <= start {
+		return float64(originalScore), fmt.Errorf("no JSON object in response")
+	}
+
+	var obj struct {
+		Score float64 `json:"score"`
+	}
+	if err := json.Unmarshal([]byte(s[start:end+1]), &obj); err != nil {
+		return float64(originalScore), fmt.Errorf("unmarshal score: %w", err)
+	}
+	return obj.Score, nil
+}
+
+// NoOpReranker passes chunks through unchanged. Used when reranking is disabled.
+type NoOpReranker struct{}
+
+func (n *NoOpReranker) Rerank(_ context.Context, _ string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
+	return chunks, nil
+}

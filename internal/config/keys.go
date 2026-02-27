@@ -11,6 +11,8 @@ type keyType int
 const (
 	kString keyType = iota
 	kInt
+	kBool
+	kFloat
 )
 
 type keySpec struct {
@@ -79,6 +81,21 @@ var specs = []keySpec{
 		apply:   func(cfg *Config, v any) { cfg.Retrieval.TopK = v.(int) },
 		extract: func(cfg Config) any { return cfg.Retrieval.TopK },
 	},
+	{
+		key: "enrichment.reranking_enabled", typ: kBool, env: "TBYD_ENRICHMENT_RERANKING_ENABLED",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.RerankingEnabled = v.(bool) },
+		extract: func(cfg Config) any { return cfg.Enrichment.RerankingEnabled },
+	},
+	{
+		key: "enrichment.reranking_timeout", typ: kString, env: "TBYD_ENRICHMENT_RERANKING_TIMEOUT",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.RerankingTimeout = v.(string) },
+		extract: func(cfg Config) any { return cfg.Enrichment.RerankingTimeout },
+	},
+	{
+		key: "enrichment.reranking_threshold", typ: kFloat, env: "TBYD_ENRICHMENT_RERANKING_THRESHOLD",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.RerankingThreshold = v.(float64) },
+		extract: func(cfg Config) any { return cfg.Enrichment.RerankingThreshold },
+	},
 }
 
 func applyBackend(cfg *Config, b ConfigBackend) error {
@@ -103,6 +120,30 @@ func applyBackend(cfg *Config, b ConfigBackend) error {
 			if ok {
 				s.apply(cfg, v)
 			}
+		case kBool:
+			v, ok, err := b.GetString(s.key)
+			if err != nil {
+				return fmt.Errorf("reading %s: %w", s.key, err)
+			}
+			if ok && v != "" {
+				if bv, err := strconv.ParseBool(v); err == nil {
+					s.apply(cfg, bv)
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] could not parse bool from config key %s=%q: %v. Using default value.\n", s.key, v, err)
+				}
+			}
+		case kFloat:
+			v, ok, err := b.GetString(s.key)
+			if err != nil {
+				return fmt.Errorf("reading %s: %w", s.key, err)
+			}
+			if ok && v != "" {
+				if f, err := strconv.ParseFloat(v, 64); err == nil {
+					s.apply(cfg, f)
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] could not parse float from config key %s=%q: %v. Using default value.\n", s.key, v, err)
+				}
+			}
 		}
 	}
 	return nil
@@ -125,6 +166,18 @@ func applyEnvOverrides(cfg *Config) {
 				s.apply(cfg, i)
 			} else {
 				fmt.Fprintf(os.Stderr, "[WARN] could not parse integer from env var %s=%q: %v. Using default value.\n", s.env, raw, err)
+			}
+		case kBool:
+			if b, err := strconv.ParseBool(raw); err == nil {
+				s.apply(cfg, b)
+			} else {
+				fmt.Fprintf(os.Stderr, "[WARN] could not parse bool from env var %s=%q: %v. Using default value.\n", s.env, raw, err)
+			}
+		case kFloat:
+			if f, err := strconv.ParseFloat(raw, 64); err == nil {
+				s.apply(cfg, f)
+			} else {
+				fmt.Fprintf(os.Stderr, "[WARN] could not parse float from env var %s=%q: %v. Using default value.\n", s.env, raw, err)
 			}
 		}
 	}

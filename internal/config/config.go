@@ -9,12 +9,13 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig
-	Ollama    OllamaConfig
-	Storage   StorageConfig
-	Proxy     ProxyConfig
-	Log       LogConfig
-	Retrieval RetrievalConfig
+	Server     ServerConfig
+	Ollama     OllamaConfig
+	Storage    StorageConfig
+	Proxy      ProxyConfig
+	Log        LogConfig
+	Retrieval  RetrievalConfig
+	Enrichment EnrichmentConfig
 }
 
 type LogConfig struct {
@@ -46,6 +47,12 @@ type RetrievalConfig struct {
 	TopK int // default 5
 }
 
+type EnrichmentConfig struct {
+	RerankingEnabled   bool
+	RerankingTimeout   string  // duration string, e.g. "5s"
+	RerankingThreshold float64 // minimum relevance score to keep a chunk
+}
+
 func defaults() Config {
 	dataDir := defaultDataDir()
 	return Config{
@@ -70,6 +77,11 @@ func defaults() Config {
 		},
 		Retrieval: RetrievalConfig{
 			TopK: 5,
+		},
+		Enrichment: EnrichmentConfig{
+			RerankingEnabled:   true,
+			RerankingTimeout:   "5s",
+			RerankingThreshold: 0.3,
 		},
 	}
 }
