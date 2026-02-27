@@ -229,7 +229,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
   - `IsIdle() bool` — checks CPU usage < threshold AND available memory > threshold
   - macOS: use `host_statistics` via CGO or subprocess (`vm_stat`, `sysctl`)
   - Optional: detect screen lock via `CGSessionCopyCurrentDictionary` (macOS)
-  - Config: `enrichment.deep_idle_cpu_max_percent` (default: 10) and `enrichment.deep_idle_mem_min_gb` (default: 12)
+  - Config: `enrichment.deep_idle_cpu_max_percent` (default: 10) and `enrichment.deep_idle_mem_min_gb` (default: 4)
 - Implement context-window-aware batching in `internal/synthesis/batcher.go`:
   - `Batcher` struct with configurable max token count per batch
   - `BatchDocuments(docs []ContextDoc) [][]ContextDoc` — packs documents into batches by token count
@@ -274,7 +274,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
   - `enrichment.deep_enabled` (bool, default: false)
   - `enrichment.deep_schedule` (string, default: "2:00")
   - `enrichment.deep_idle_cpu_max_percent` (int, default: 10)
-  - `enrichment.deep_idle_mem_min_gb` (int, default: 12)
+  - `enrichment.deep_idle_mem_min_gb` (int, default: 4)
 
 **Unit tests** (`internal/synthesis/batcher_test.go`):
 - `TestBatchDocuments_FitsInOneBatch` — 5 short docs totalling < context window; verify single batch

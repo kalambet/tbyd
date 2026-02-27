@@ -551,7 +551,7 @@ jobs (
 - Worker goroutines poll the jobs table on a configurable interval (default 1s)
 - Failed jobs are retried with exponential backoff up to `max_attempts`
 - Completed jobs are retained for 7 days then garbage-collected
-- `ingest_deep_enrich` jobs are **batch-processed**: unlike other job types that are claimed and processed individually, the deep enrichment worker claims all pending `ingest_deep_enrich` jobs at once, groups them by topic similarity, and processes them together in context-window-sized batches. This worker only activates during idle periods or the scheduled overnight window.
+- `ingest_deep_enrich` jobs are **batch-processed**: unlike other job types that are claimed and processed individually, the deep enrichment worker claims up to 5,000 pending jobs per run, groups them by topic similarity, and processes them together in context-window-sized batches. It loops until the queue is drained. On startup, jobs stuck in `running` for longer than 30 minutes are reset to `pending` (with incremented attempt count) to recover from crashes. This worker only activates during idle periods or the scheduled overnight window.
 
 ---
 
@@ -733,7 +733,8 @@ Deep enrichment worker activates (idle or scheduled)
 **Config:**
 - `enrichment.deep_enabled` (default: false)
 - `enrichment.deep_schedule` (default: "2:00" — 2 AM local time)
-- `enrichment.deep_idle_threshold` (default: CPU < 10%, available memory > 12GB)
+- `enrichment.deep_idle_cpu_max_percent` (default: 10)
+- `enrichment.deep_idle_mem_min_gb` (default: 4 — conservative to allow running on 16GB machines where OS + apps typically consume 6-8GB; mistral-nemo 4-bit needs ~8GB which comes from model VRAM/swap, not free RAM)
 
 ### Periodic Background Synthesis (scheduled, e.g. nightly)
 
