@@ -121,10 +121,6 @@ collect:
 		}
 	}
 
-	if len(scored) == 0 {
-		return chunks, nil
-	}
-
 	// Filter chunks below the relevance threshold.
 	filtered := make([]retrieval.ContextChunk, 0, len(scored))
 	for _, ch := range scored {
@@ -186,13 +182,14 @@ func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrie
 func parseScore(resp string, originalScore float32) (float64, error) {
 	s := strings.TrimSpace(resp)
 
-	// Strip markdown code fences safely using TrimPrefix.
+	// Strip markdown code fences if present. Skip the optional language tag
+	// (e.g. "json", "JSON") and let the brace-finding logic below handle parsing.
 	if idx := strings.Index(s, "```"); idx != -1 {
-		s = s[idx+3:]
-		s = strings.TrimSpace(strings.TrimPrefix(s, "json"))
-		if end := strings.Index(s, "```"); end != -1 {
-			s = s[:end]
+		content := s[idx+3:]
+		if end := strings.Index(content, "```"); end != -1 {
+			content = content[:end]
 		}
+		s = content
 	}
 
 	// Extract JSON object by brace position.
