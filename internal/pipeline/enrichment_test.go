@@ -14,6 +14,7 @@ import (
 	"github.com/kalambet/tbyd/internal/ollama"
 	"github.com/kalambet/tbyd/internal/profile"
 	"github.com/kalambet/tbyd/internal/proxy"
+	"github.com/kalambet/tbyd/internal/reranking"
 	"github.com/kalambet/tbyd/internal/retrieval"
 )
 
@@ -131,7 +132,28 @@ func buildEnricher(chatter *mockChatter, eng *mockEngine, vs *mockVectorStore, p
 	ret := retrieval.NewRetriever(embedder, vs)
 	profileMgr := profile.NewManager(ps)
 	comp := composer.New(4000)
-	return NewEnricher(extractor, ret, profileMgr, comp, 5)
+	return NewEnricher(extractor, ret, profileMgr, comp, &reranking.NoOpReranker{}, 5)
+}
+
+// mockReranker for testing reranker integration in the pipeline.
+type mockReranker struct {
+	rerankFn func(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error)
+}
+
+func (m *mockReranker) Rerank(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
+	if m.rerankFn != nil {
+		return m.rerankFn(ctx, query, chunks)
+	}
+	return chunks, nil
+}
+
+func buildEnricherWith(chatter *mockChatter, eng *mockEngine, vs *mockVectorStore, ps *mockProfileStore, rr reranking.Reranker) *Enricher {
+	extractor := intent.NewExtractor(chatter, "test-fast")
+	embedder := retrieval.NewEmbedder(eng, "test-embed")
+	ret := retrieval.NewRetriever(embedder, vs)
+	profileMgr := profile.NewManager(ps)
+	comp := composer.New(4000)
+	return NewEnricher(extractor, ret, profileMgr, comp, rr, 5)
 }
 
 // --- tests ---
@@ -385,6 +407,104 @@ func TestEnrich_ContextCancelled(t *testing.T) {
 		// Good — returned promptly.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Enrich did not return promptly after context cancellation")
+	}
+}
+
+func TestEnrich_WithReranker(t *testing.T) {
+	chatter := &mockChatter{
+		chatFn: func(ctx context.Context, model string, msgs []ollama.Message, schema *ollama.Schema) (string, error) {
+			return `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":false}`, nil
+		},
+	}
+	eng := &mockEngine{
+		embedFn: func(ctx context.Context, model string, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	vs := &mockVectorStore{
+		searchResults: []retrieval.ScoredRecord{
+			{Record: retrieval.Record{ID: "a", SourceID: "s1", TextChunk: "first chunk"}, Score: 0.5},
+			{Record: retrieval.Record{ID: "b", SourceID: "s2", TextChunk: "second chunk"}, Score: 0.9},
+		},
+	}
+	ps := &mockProfileStore{}
+
+	// Reranker reverses order: put higher-scored chunk first.
+	rr := &mockReranker{
+		rerankFn: func(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
+			// Return chunks in reversed order to verify pipeline respects reranked order.
+			reversed := make([]retrieval.ContextChunk, len(chunks))
+			for i, ch := range chunks {
+				reversed[len(chunks)-1-i] = ch
+			}
+			return reversed, nil
+		},
+	}
+
+	enricher := buildEnricherWith(chatter, eng, vs, ps, rr)
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("test"))
+
+	if len(meta.ChunksUsed) != 2 {
+		t.Fatalf("ChunksUsed = %d, want 2", len(meta.ChunksUsed))
+	}
+
+	// Verify the composed request uses the reranked order (reversed).
+	var msgs []map[string]string
+	json.Unmarshal(enriched.Messages, &msgs)
+	if len(msgs) == 0 {
+		t.Fatal("no messages in enriched request")
+	}
+	sysContent := msgs[0]["content"]
+	// "second chunk" was originally last but reranker moved it first.
+	secondIdx := strings.Index(sysContent, "second chunk")
+	firstIdx := strings.Index(sysContent, "first chunk")
+	if secondIdx == -1 || firstIdx == -1 {
+		t.Fatalf("system message missing expected chunks; content=%q", sysContent)
+	}
+	if secondIdx > firstIdx {
+		t.Error("reranked order not respected: 'second chunk' should appear before 'first chunk'")
+	}
+}
+
+func TestEnrich_RerankerFails(t *testing.T) {
+	chatter := &mockChatter{
+		chatFn: func(ctx context.Context, model string, msgs []ollama.Message, schema *ollama.Schema) (string, error) {
+			return `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":false}`, nil
+		},
+	}
+	eng := &mockEngine{
+		embedFn: func(ctx context.Context, model string, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	vs := &mockVectorStore{
+		searchResults: []retrieval.ScoredRecord{
+			{Record: retrieval.Record{ID: "c1", SourceID: "s1", TextChunk: "chunk one"}, Score: 0.8},
+		},
+	}
+	ps := &mockProfileStore{}
+
+	rr := &mockReranker{
+		rerankFn: func(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
+			return nil, errors.New("reranker unavailable")
+		},
+	}
+
+	enricher := buildEnricherWith(chatter, eng, vs, ps, rr)
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("test"))
+
+	// Pipeline should proceed with original chunk order.
+	if len(meta.ChunksUsed) != 1 {
+		t.Fatalf("ChunksUsed = %d, want 1", len(meta.ChunksUsed))
+	}
+
+	var msgs []map[string]string
+	json.Unmarshal(enriched.Messages, &msgs)
+	if len(msgs) == 0 {
+		t.Fatal("no messages in enriched request")
+	}
+	if !strings.Contains(msgs[0]["content"], "chunk one") {
+		t.Error("original chunk should still appear when reranker fails")
 	}
 }
 

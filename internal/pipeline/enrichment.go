@@ -10,6 +10,7 @@ import (
 	"github.com/kalambet/tbyd/internal/intent"
 	"github.com/kalambet/tbyd/internal/profile"
 	"github.com/kalambet/tbyd/internal/proxy"
+	"github.com/kalambet/tbyd/internal/reranking"
 	"github.com/kalambet/tbyd/internal/retrieval"
 )
 
@@ -18,13 +19,15 @@ type EnrichmentMetadata struct {
 	IntentExtracted      bool
 	ChunksUsed           []string
 	EnrichmentDurationMs int64
+	RerankingDurationMs  int64
 }
 
 // Enricher orchestrates the enrichment pipeline: intent extraction, context
-// retrieval, profile loading, and prompt composition.
+// retrieval, reranking, profile loading, and prompt composition.
 type Enricher struct {
 	extractor *intent.Extractor
 	retriever *retrieval.Retriever
+	reranker  reranking.Reranker
 	profile   *profile.Manager
 	composer  *composer.Composer
 	topK      int
@@ -32,19 +35,25 @@ type Enricher struct {
 
 // NewEnricher creates an Enricher wired to all pipeline components.
 // topK controls how many context chunks are retrieved (default 5 if <= 0).
+// If reranker is nil, a NoOpReranker is used.
 func NewEnricher(
 	extractor *intent.Extractor,
 	retriever *retrieval.Retriever,
 	profileMgr *profile.Manager,
 	comp *composer.Composer,
+	rr reranking.Reranker,
 	topK int,
 ) *Enricher {
 	if topK <= 0 {
 		topK = 5
 	}
+	if rr == nil {
+		rr = &reranking.NoOpReranker{}
+	}
 	return &Enricher{
 		extractor: extractor,
 		retriever: retriever,
+		reranker:  rr,
 		profile:   profileMgr,
 		composer:  comp,
 		topK:      topK,
@@ -74,18 +83,29 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 
 	// 2. Retrieve context chunks.
 	chunks := e.retriever.RetrieveForIntent(ctx, lastUserMsg, extracted, e.topK)
+
+	// 3. Rerank chunks by query relevance.
+	rerankStart := time.Now()
+	reranked, err := e.reranker.Rerank(ctx, lastUserMsg, chunks)
+	meta.RerankingDurationMs = time.Since(rerankStart).Milliseconds()
+	if err != nil {
+		slog.Warn("enrichment: reranking failed, using original order", "error", err)
+	} else {
+		chunks = reranked
+	}
+
 	for _, ch := range chunks {
 		meta.ChunksUsed = append(meta.ChunksUsed, ch.ID)
 	}
 
-	// 3. Load profile summary.
+	// 5. Load profile summary.
 	profileSummary, err := e.profile.GetSummary()
 	if err != nil {
 		slog.Warn("enrichment: failed to load profile summary", "error", err)
 		profileSummary = ""
 	}
 
-	// 4. Compose enriched request.
+	// 6. Compose enriched request.
 	enriched, err := e.composer.Compose(req, chunks, profileSummary)
 	if err != nil {
 		slog.Warn("enrichment: composition failed, forwarding original request", "error", err)
