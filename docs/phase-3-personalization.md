@@ -233,7 +233,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 - Implement context-window-aware batching in `internal/synthesis/batcher.go`:
   - `Batcher` struct with configurable max token count per batch
   - `BatchDocuments(docs []ContextDoc) [][]ContextDoc` — packs documents into batches by token count
-  - Token estimation: use word count * 1.3 as approximation (avoids tokenizer dependency)
+  - Token estimation: use word count * 1.5 as approximation (avoids tokenizer dependency; the higher multiplier accounts for code, technical terms, and non-English content). Reserve 10% of the context window as safety margin to avoid runtime overflow.
   - A single document exceeding the context window is placed alone in its own batch and chunked: split into sequential segments that each fit the context window, process each chunk independently, then merge the per-chunk `DeepEnrichment` results (union entities/topics, concatenate key points, deduplicate). Log a warning when chunking occurs so operators can tune batch sizes or document limits.
 - Implement topic-similarity grouping in `internal/synthesis/grouper.go`:
   - `GroupByTopics(docs []ContextDoc) [][]ContextDoc` — groups documents with overlapping pass 1 topics
@@ -262,10 +262,12 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 - Implement batch worker in `internal/synthesis/deep_worker.go`:
   - `DeepEnrichmentWorker` struct
   - `Run(ctx context.Context) error` — claims up to 5,000 pending `ingest_deep_enrich` jobs per run (configurable via `enrichment.deep_batch_claim_limit`), loads raw content from `context_docs`, groups by topic, batches by token count, processes each batch with deep model. Loops until the queue is drained or the context is cancelled.
+  - Job recovery: on startup, reset any jobs stuck in `running` status for longer than a configurable timeout (default: 30 minutes) back to `pending`, incrementing their `attempts` counter. Jobs exceeding `max_attempts` are marked `failed`. This prevents indefinite stalls after a worker crash.
   - Activation: triggered by `IdleDetector.IsIdle()` returning true OR by the scheduled overnight window
   - `Schedule(idleCheckInterval, scheduledTime)` — polls idle detector on interval; also fires at scheduled time
 - Implement additive metadata update:
-  - Merge `DeepEnrichment` results into `context_docs`: update tags, add metadata JSON column with deep extraction fields
+  - Add migration `003_deep_enrichment.sql`: `ALTER TABLE context_docs ADD COLUMN deep_metadata TEXT DEFAULT '{}'` (JSON column for deep extraction fields)
+  - Merge `DeepEnrichment` results into `context_docs`: update tags, write deep extraction fields to `deep_metadata`
   - Optionally refine vector chunks: if deep extraction reveals key points missed by pass 1, add new vector entries with `source_type: "deep_enrichment"`
   - Preserve all pass 1 data — deep enrichment is additive, never destructive
 - Add config keys to `internal/config/keys.go`:
