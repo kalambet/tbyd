@@ -229,17 +229,17 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
   - `IsIdle() bool` — checks CPU usage < threshold AND available memory > threshold
   - macOS: use `host_statistics` via CGO or subprocess (`vm_stat`, `sysctl`)
   - Optional: detect screen lock via `CGSessionCopyCurrentDictionary` (macOS)
-  - Config: `enrichment.deep_idle_threshold` (default: CPU < 10%, available memory > 12GB)
+  - Config: `enrichment.deep_idle_cpu_max_percent` (default: 10) and `enrichment.deep_idle_mem_min_gb` (default: 12)
 - Implement context-window-aware batching in `internal/synthesis/batcher.go`:
   - `Batcher` struct with configurable max token count per batch
   - `BatchDocuments(docs []ContextDoc) [][]ContextDoc` — packs documents into batches by token count
   - Token estimation: use word count * 1.3 as approximation (avoids tokenizer dependency)
-  - A single document exceeding the context window is placed alone in its own batch (truncated if necessary)
+  - A single document exceeding the context window is placed alone in its own batch and chunked: split into sequential segments that each fit the context window, process each chunk independently, then merge the per-chunk `DeepEnrichment` results (union entities/topics, concatenate key points, deduplicate). Log a warning when chunking occurs so operators can tune batch sizes or document limits.
 - Implement topic-similarity grouping in `internal/synthesis/grouper.go`:
   - `GroupByTopics(docs []ContextDoc) [][]ContextDoc` — groups documents with overlapping pass 1 topics
   - Uses Jaccard similarity on topic tag sets (threshold: > 0.3 overlap)
-  - Ungrouped documents (no topic overlap with any other) form a mixed batch
-  - Groups are then passed to the batcher for context-window packing
+  - Ungrouped documents (no topic overlap with any other) form a single logical "mixed" group
+  - All groups (topic-based and mixed) are then passed to the `Batcher` for context-window packing — a large mixed group will be split into multiple physical batches that each fit within the context window
 - Create deep enrichment prompt template in `internal/synthesis/deep_enrich.go`:
   - `DeepEnricher` struct wrapping `ollama.Client` (deep model)
   - `EnrichBatch(ctx context.Context, docs []ContextDoc) ([]DeepEnrichment, error)`
@@ -261,7 +261,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
   - After pass 1 completes in the ingestion pipeline, enqueue an `ingest_deep_enrich` job with `payload_json` containing the `context_docs.id`
 - Implement batch worker in `internal/synthesis/deep_worker.go`:
   - `DeepEnrichmentWorker` struct
-  - `Run(ctx context.Context) error` — claims all pending `ingest_deep_enrich` jobs, loads raw content from `context_docs`, groups by topic, batches by token count, processes each batch with deep model
+  - `Run(ctx context.Context) error` — claims up to 5,000 pending `ingest_deep_enrich` jobs per run (configurable via `enrichment.deep_batch_claim_limit`), loads raw content from `context_docs`, groups by topic, batches by token count, processes each batch with deep model. Loops until the queue is drained or the context is cancelled.
   - Activation: triggered by `IdleDetector.IsIdle()` returning true OR by the scheduled overnight window
   - `Schedule(idleCheckInterval, scheduledTime)` — polls idle detector on interval; also fires at scheduled time
 - Implement additive metadata update:
@@ -271,7 +271,8 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 - Add config keys to `internal/config/keys.go`:
   - `enrichment.deep_enabled` (bool, default: false)
   - `enrichment.deep_schedule` (string, default: "2:00")
-  - `enrichment.deep_idle_threshold` (string, default: "cpu<10,mem>12gb")
+  - `enrichment.deep_idle_cpu_max_percent` (int, default: 10)
+  - `enrichment.deep_idle_mem_min_gb` (int, default: 12)
 
 **Unit tests** (`internal/synthesis/batcher_test.go`):
 - `TestBatchDocuments_FitsInOneBatch` — 5 short docs totalling < context window; verify single batch
