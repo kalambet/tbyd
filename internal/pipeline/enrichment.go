@@ -60,10 +60,16 @@ func NewEnricher(
 	}
 }
 
+// candidateMultiplier controls how many extra candidates are fetched for
+// reranking. Retrieval fetches topK*candidateMultiplier chunks; after reranking
+// the result is trimmed back to topK. This lets the reranker surface relevant
+// documents that vector search placed below position topK.
+const candidateMultiplier = 4
+
 // Enrich runs the full enrichment pipeline on the incoming request:
 //  1. Extract intent from the last user message (3s timeout, fallback on failure)
-//  2. Retrieve context chunks using the intent
-//  3. Rerank chunks by query relevance
+//  2. Retrieve a larger candidate pool (topK×4) for reranking
+//  3. Rerank candidates by query relevance and trim to topK
 //  4. Load user profile summary
 //  5. Compose the enriched request
 //
@@ -82,17 +88,19 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		meta.IntentExtracted = true
 	}
 
-	// 2. Retrieve context chunks.
-	chunks := e.retriever.RetrieveForIntent(ctx, lastUserMsg, extracted, e.topK)
+	// 2. Retrieve a larger candidate pool for reranking.
+	candidates := e.retriever.RetrieveForIntent(ctx, lastUserMsg, extracted, e.topK*candidateMultiplier)
 
-	// 3. Rerank chunks by query relevance.
+	// 3. Rerank candidates and trim to topK.
 	rerankStart := time.Now()
-	reranked, err := e.reranker.Rerank(ctx, lastUserMsg, chunks)
+	chunks, err := e.reranker.Rerank(ctx, lastUserMsg, candidates)
 	meta.RerankingDurationMs = time.Since(rerankStart).Milliseconds()
 	if err != nil {
 		slog.Warn("enrichment: reranking failed, using original order", "error", err)
-	} else {
-		chunks = reranked
+		chunks = candidates
+	}
+	if len(chunks) > e.topK {
+		chunks = chunks[:e.topK]
 	}
 
 	for _, ch := range chunks {
