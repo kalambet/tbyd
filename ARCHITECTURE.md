@@ -240,7 +240,8 @@ Given the expanded scope of local processing (real-time intent extraction AND ba
 **Model assignment by task:**
 - Intent extraction → fast model
 - Retrieval reranking → fast model (optional, adds ~0.5–1s latency)
-- Ingestion enrichment (document tagging, key point extraction) → deep model (async)
+- Ingestion enrichment — pass 1 (basic extraction for instant searchability) → fast model
+- Ingestion enrichment — pass 2 (deep extraction, cross-document reasoning) → deep model (batched, idle/overnight)
 - Nightly profile synthesis → deep model
 - Session summarization → deep model (triggered post-session)
 - Fine-tune data preparation → deep model
@@ -535,7 +536,7 @@ All async work (ingestion enrichment, interaction summarization, feedback extrac
 ```sql
 jobs (
     id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,          -- "ingest_enrich", "summarize", "feedback_extract", "nightly_synthesis"
+    type TEXT NOT NULL,          -- "ingest_enrich", "ingest_deep_enrich", "summarize", "feedback_extract", "nightly_synthesis"
     payload_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',  -- "pending", "running", "completed", "failed"
     attempts INTEGER DEFAULT 0,
@@ -550,6 +551,7 @@ jobs (
 - Worker goroutines poll the jobs table on a configurable interval (default 1s)
 - Failed jobs are retried with exponential backoff up to `max_attempts`
 - Completed jobs are retained for 7 days then garbage-collected
+- `ingest_deep_enrich` jobs are **batch-processed**: unlike other job types that are claimed and processed individually, the deep enrichment worker claims all pending `ingest_deep_enrich` jobs at once, groups them by topic similarity, and processes them together in context-window-sized batches. This worker only activates during idle periods or the scheduled overnight window.
 
 ---
 
@@ -626,11 +628,15 @@ tbyd ingest --text "I prefer short, direct answers with code examples"
 
 ---
 
-## Local Data Enrichment Pipeline (Deep)
+## Local Data Enrichment Pipeline (Two-Pass)
 
-The local model does more than just intent extraction at query time. It runs a continuous background enrichment loop over stored data.
+The local models do more than just intent extraction at query time. They run a two-pass enrichment pipeline over ingested content, plus a continuous background synthesis loop for profile updates.
 
-### Real-Time Enrichment (on every ingestion)
+**Pass 1** uses the fast model (phi3.5) to make content instantly searchable. **Pass 2** uses the deep model (mistral-nemo) to produce richer extraction, cross-document reasoning, and better domain classification — running in batches when the machine is idle or overnight.
+
+### Pass 1 — Fast Enrichment (on every ingestion)
+
+The fast model processes ingested content immediately for instant searchability. Raw content is always preserved in `context_docs.content` for the deep model pass.
 
 ```
 New content arrives (any source)
@@ -643,7 +649,7 @@ New content arrives (any source)
     - Email: strip headers, threading, signatures
     │
     ▼
-[2. Local LLM Processing] — Phi-3.5-mini
+[2. Fast LLM Processing] — Phi-3.5-mini
     Input:  raw content
     Output: {
       summary: "...",
@@ -659,14 +665,75 @@ New content arrives (any source)
 [3. Embedding + Storage]
     - Embed summary + key points via nomic-embed-text
     - Store in VectorStore with metadata
-    - Store structured extraction in SQLite context_docs
+    - Store raw content + structured extraction in SQLite context_docs
     │
     ▼
-[4. Profile Update]
+[4. Profile Update + Deep Enrichment Queue]
     - Update topic interest frequency
     - Detect emerging new interests
     - Flag for periodic profile synthesis
+    - Enqueue `ingest_deep_enrich` job for this document
 ```
+
+### Pass 2 — Deep Enrichment (batched, idle/overnight)
+
+The deep model re-processes raw content from `context_docs.content` to produce higher-quality extraction. This pass is **additive** — it updates metadata and may refine vector chunks, but never discards the fast model's initial work. The system is fully functional on pass 1 results alone; pass 2 is an eventually-consistent quality improvement.
+
+**Trigger:** runs when the machine is idle (low CPU/memory usage, screen locked) or during a scheduled overnight window (configurable, default: 2 AM). Never runs during active user queries.
+
+**Batching strategy:**
+- Documents from the `ingest_deep_enrich` queue are packed into batches that maximize the deep model's context window utilization
+- Batch size is determined by token count, not document count — 1 large PDF or 40 short notes may form one batch
+- Sequence in the queue does not matter; no dependency between documents
+
+**Topic-aware grouping:** before batching, the system uses the fast model's already-extracted topics (from pass 1) to group documents with overlapping topics into the same batch. This enables cross-document reasoning within the batch (e.g., identifying that 3 articles cover the same topic from different angles).
+
+```
+Deep enrichment worker activates (idle or scheduled)
+    │
+    ▼
+[1. Claim Pending Jobs]
+    - Claim all pending `ingest_deep_enrich` jobs from queue
+    - If queue empty: exit, unload model
+    │
+    ▼
+[2. Topic-Aware Grouping]
+    - Group documents by overlapping pass 1 topics
+    - Pack groups into batches fitting the context window
+    │
+    ▼
+[3. Deep LLM Processing] — mistral-nemo (per batch)
+    Input:  raw content from context_docs.content for all docs in batch
+    Output per document: {
+      enriched_entities: ["..."],        // more precise, disambiguated
+      enriched_topics: ["..."],          // more accurate domain classification
+      deep_key_points: ["..."],          // nuanced, catches subtleties
+      cross_references: ["doc_id:..."],  // links to related documents in batch
+      domain_classification: "...",      // leverages deep model's world knowledge
+      relationship_notes: "..."          // how this doc relates to others
+    }
+    │
+    ▼
+[4. Additive Update]
+    - Merge deep extraction into context_docs metadata (preserve pass 1 data)
+    - Update tags with enriched topics
+    - Optionally add/refine vector chunks if deep extraction reveals missed sections
+    - Store cross-document relationship annotations
+    │
+    ▼
+[5. Cleanup]
+    - Mark jobs as completed
+    - Deep model unloads after queue is drained
+```
+
+**Resource management:** the deep model loads once per batch run, processes the entire queue, then unloads. No per-document model loading.
+
+**Graceful degradation:** if the deep model is unavailable or not configured (`enrichment.deep_enabled = false`), the system operates entirely on pass 1 results. Pass 2 is opt-in.
+
+**Config:**
+- `enrichment.deep_enabled` (default: false)
+- `enrichment.deep_schedule` (default: "2:00" — 2 AM local time)
+- `enrichment.deep_idle_threshold` (default: CPU < 10%, available memory > 12GB)
 
 ### Periodic Background Synthesis (scheduled, e.g. nightly)
 
@@ -810,7 +877,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 | Phase 0 | [docs/phase-0-foundation.md](docs/phase-0-foundation.md) | Go scaffold, config, SQLite, Ollama, passthrough proxy |
 | Phase 1 | [docs/phase-1-enrichment.md](docs/phase-1-enrichment.md) | VectorStore, intent extraction, context retrieval, prompt composer |
 | Phase 2 | [docs/phase-2-user-surfaces.md](docs/phase-2-user-surfaces.md) | MCP server, CLI, SwiftUI menubar app, Share Extension |
-| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Feedback, profile editor, preference learning, nightly synthesis |
+| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Feedback, profile editor, preference learning, nightly synthesis, deep enrichment |
 | Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Browser extension, Feedly sync, content extraction, MLX fine-tuning |
 | Phase 5 | [docs/phase-5-polish-distribution.md](docs/phase-5-polish-distribution.md) | Project rename, onboarding, encryption, Homebrew, App Store |
 
@@ -857,6 +924,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [ ] **3.3** Preference extraction from feedback (background job)
 - [ ] **3.4** Profile injection into enrichment pipeline (calibration)
 - [ ] **3.5** Nightly profile synthesis (deep model background pass)
+- [ ] **3.6** Deep enrichment pass (two-pass ingestion: batched deep model processing, idle/overnight trigger, topic-aware grouping, additive metadata updates)
 
 ### Phase 4 — Extended Ingestion & Model Tuning
 - [ ] **4.1** Browser extension (Safari + Chrome)

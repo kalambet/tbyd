@@ -217,6 +217,104 @@
 
 ---
 
+## Issue 3.6 — Deep enrichment pass (two-pass ingestion model)
+
+**Context:** The fast model (phi3.5) provides instant searchability on ingestion, but the deep model (mistral-nemo) produces significantly better extraction at any content length — better entity disambiguation, cross-document reasoning, domain classification, and key point extraction. This issue implements the second pass of the two-pass ingestion model: a batched deep enrichment that runs when the machine is idle or overnight, re-processing raw content with the deep model to additively improve the knowledge base.
+
+Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 reads this raw material and produces richer metadata without discarding the fast model's initial work. The system is fully functional on pass 1 alone; pass 2 is an eventually-consistent quality improvement.
+
+**Tasks:**
+- Implement idle detection in `internal/synthesis/idle.go`:
+  - `IdleDetector` struct
+  - `IsIdle() bool` — checks CPU usage < threshold AND available memory > threshold
+  - macOS: use `host_statistics` via CGO or subprocess (`vm_stat`, `sysctl`)
+  - Optional: detect screen lock via `CGSessionCopyCurrentDictionary` (macOS)
+  - Config: `enrichment.deep_idle_threshold` (default: CPU < 10%, available memory > 12GB)
+- Implement context-window-aware batching in `internal/synthesis/batcher.go`:
+  - `Batcher` struct with configurable max token count per batch
+  - `BatchDocuments(docs []ContextDoc) [][]ContextDoc` — packs documents into batches by token count
+  - Token estimation: use word count * 1.3 as approximation (avoids tokenizer dependency)
+  - A single document exceeding the context window is placed alone in its own batch (truncated if necessary)
+- Implement topic-similarity grouping in `internal/synthesis/grouper.go`:
+  - `GroupByTopics(docs []ContextDoc) [][]ContextDoc` — groups documents with overlapping pass 1 topics
+  - Uses Jaccard similarity on topic tag sets (threshold: > 0.3 overlap)
+  - Ungrouped documents (no topic overlap with any other) form a mixed batch
+  - Groups are then passed to the batcher for context-window packing
+- Create deep enrichment prompt template in `internal/synthesis/deep_enrich.go`:
+  - `DeepEnricher` struct wrapping `ollama.Client` (deep model)
+  - `EnrichBatch(ctx context.Context, docs []ContextDoc) ([]DeepEnrichment, error)`
+  - Prompt: given batch of raw documents + their pass 1 topics, produce per-document enriched extraction
+  - `DeepEnrichment` struct:
+    ```go
+    type DeepEnrichment struct {
+        DocID                string
+        EnrichedEntities     []string
+        EnrichedTopics       []string
+        DeepKeyPoints        []string
+        CrossReferences      []string  // IDs of related docs in batch
+        DomainClassification string
+        RelationshipNotes    string
+    }
+    ```
+  - Parse structured JSON response from deep model
+- Wire `ingest_deep_enrich` job creation into ingestion flow:
+  - After pass 1 completes in the ingestion pipeline, enqueue an `ingest_deep_enrich` job with `payload_json` containing the `context_docs.id`
+- Implement batch worker in `internal/synthesis/deep_worker.go`:
+  - `DeepEnrichmentWorker` struct
+  - `Run(ctx context.Context) error` — claims all pending `ingest_deep_enrich` jobs, loads raw content from `context_docs`, groups by topic, batches by token count, processes each batch with deep model
+  - Activation: triggered by `IdleDetector.IsIdle()` returning true OR by the scheduled overnight window
+  - `Schedule(idleCheckInterval, scheduledTime)` — polls idle detector on interval; also fires at scheduled time
+- Implement additive metadata update:
+  - Merge `DeepEnrichment` results into `context_docs`: update tags, add metadata JSON column with deep extraction fields
+  - Optionally refine vector chunks: if deep extraction reveals key points missed by pass 1, add new vector entries with `source_type: "deep_enrichment"`
+  - Preserve all pass 1 data — deep enrichment is additive, never destructive
+- Add config keys to `internal/config/keys.go`:
+  - `enrichment.deep_enabled` (bool, default: false)
+  - `enrichment.deep_schedule` (string, default: "2:00")
+  - `enrichment.deep_idle_threshold` (string, default: "cpu<10,mem>12gb")
+
+**Unit tests** (`internal/synthesis/batcher_test.go`):
+- `TestBatchDocuments_FitsInOneBatch` — 5 short docs totalling < context window; verify single batch
+- `TestBatchDocuments_SplitsIntoBatches` — 20 docs exceeding context window; verify multiple batches, each within limit
+- `TestBatchDocuments_LargeDocAlone` — 1 doc exceeding context window; verify placed in its own batch
+- `TestBatchDocuments_EmptyInput` — no docs; verify empty result (no error)
+- `TestBatchDocuments_TokenEstimation` — doc with known word count; verify token estimate within 20% of actual
+
+**Unit tests** (`internal/synthesis/grouper_test.go`):
+- `TestGroupByTopics_OverlappingTopics` — 3 docs share topic "go"; verify grouped together
+- `TestGroupByTopics_NoOverlap` — 3 docs with disjoint topics; verify mixed batch
+- `TestGroupByTopics_PartialOverlap` — 5 docs, 2 share "kubernetes", 2 share "privacy", 1 isolated; verify 3 groups
+- `TestGroupByTopics_EmptyTopics` — docs with no pass 1 topics; verify all placed in mixed batch
+
+**Unit tests** (`internal/synthesis/deep_enrich_test.go`) — mock `ollama.Client`:
+- `TestEnrichBatch_ParsesResponse` — mock LLM returns valid JSON for 3 docs; verify 3 `DeepEnrichment` results with correct doc IDs
+- `TestEnrichBatch_CrossReferences` — mock LLM identifies 2 related docs; verify `CrossReferences` populated
+- `TestEnrichBatch_LLMFails` — mock LLM errors; verify empty result (not panic), error returned
+- `TestEnrichBatch_MalformedJSON` — mock returns invalid JSON; verify graceful error handling
+
+**Unit tests** (`internal/synthesis/deep_worker_test.go`) — mock store, mock LLM:
+- `TestRun_EmptyQueue` — no pending jobs; verify exits without error, model not loaded
+- `TestRun_ProcessesBatch` — 5 pending jobs; verify all claimed, processed, marked completed
+- `TestRun_AdditiveUpdate` — verify pass 1 tags preserved after deep enrichment updates metadata
+- `TestRun_ContextCancellation` — cancel context mid-batch; verify partial progress saved, remaining jobs stay pending
+
+**Unit tests** (`internal/synthesis/idle_test.go`):
+- `TestIsIdle_BelowThreshold` — mock CPU 5%, memory 16GB available; verify returns true
+- `TestIsIdle_AboveThreshold` — mock CPU 50%; verify returns false
+- `TestIsIdle_MemoryConstrained` — mock memory 4GB available; verify returns false
+
+**Acceptance criteria:**
+- Ingesting a document enqueues an `ingest_deep_enrich` job in the jobs table
+- Manually triggering deep enrichment updates `context_docs` metadata with richer extraction
+- Pass 1 data (tags, summary, entities) is preserved after pass 2 runs
+- Querying a document works before deep enrichment (pass 1 sufficient for retrieval)
+- Querying after deep enrichment shows improved metadata in results
+- System works normally with `enrichment.deep_enabled = false` (no deep enrichment jobs created)
+- Batching respects context window limits and groups related topics
+- `go test ./internal/synthesis/...` passes
+
+---
+
 ## Phase 3 Verification
 
 1. Rate 5 consecutive responses as negative because they were "too long" → check if a "concise" preference appears in profile after synthesis
@@ -225,5 +323,9 @@
 4. Accept a delta → verify profile updated → send query → verify new preference reflected
 5. Reject a delta → verify it does not reappear in next synthesis
 6. Profile with 50 items → verify `GetSummary()` stays under 500 tokens
-7. `go test ./...` passes
-8. `go test -tags integration ./...` passes
+7. Ingest a document → verify `ingest_deep_enrich` job appears in jobs table
+8. Manually trigger deep enrichment → verify `context_docs` metadata updated with richer extraction, pass 1 data preserved
+9. Ingest 20 documents with mixed topics → trigger deep enrichment → verify topic-aware batching groups related documents
+10. Disable deep enrichment (`enrichment.deep_enabled = false`) → ingest a document → verify no `ingest_deep_enrich` job created
+11. `go test ./...` passes
+12. `go test -tags integration ./...` passes
