@@ -116,6 +116,25 @@ func TestLLMReranker_DropsLowScore(t *testing.T) {
 	}
 }
 
+func TestLLMReranker_AllBelowThreshold(t *testing.T) {
+	// All chunks score below threshold — should return empty slice, not original.
+	eng := &mockEngine{
+		chatFn: func(ctx context.Context, model string, msgs []engine.Message, schema *engine.Schema) (string, error) {
+			return `{"score": 0.1}`, nil // all below threshold 0.3
+		},
+	}
+
+	chunks := makeChunks(3, 0.9)
+	r := newLLMReranker(eng, 0.3, 5*time.Second, 0)
+	result, err := r.Rerank(context.Background(), "query", chunks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("got %d chunks, want 0 — all scored below threshold, original must not be returned", len(result))
+	}
+}
+
 func TestLLMReranker_Timeout(t *testing.T) {
 	eng := &mockEngine{
 		chatFn: func(ctx context.Context, model string, msgs []engine.Message, schema *engine.Schema) (string, error) {

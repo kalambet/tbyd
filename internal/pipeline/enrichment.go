@@ -63,8 +63,9 @@ func NewEnricher(
 // Enrich runs the full enrichment pipeline on the incoming request:
 //  1. Extract intent from the last user message (3s timeout, fallback on failure)
 //  2. Retrieve context chunks using the intent
-//  3. Load user profile summary
-//  4. Compose the enriched request
+//  3. Rerank chunks by query relevance
+//  4. Load user profile summary
+//  5. Compose the enriched request
 //
 // On failure at any step, the pipeline degrades gracefully — the original
 // request is enriched with whatever context is available.
@@ -98,14 +99,14 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		meta.ChunksUsed = append(meta.ChunksUsed, ch.ID)
 	}
 
-	// 5. Load profile summary.
+	// 4. Load profile summary.
 	profileSummary, err := e.profile.GetSummary()
 	if err != nil {
 		slog.Warn("enrichment: failed to load profile summary", "error", err)
 		profileSummary = ""
 	}
 
-	// 6. Compose enriched request.
+	// 5. Compose enriched request.
 	enriched, err := e.composer.Compose(req, chunks, profileSummary)
 	if err != nil {
 		slog.Warn("enrichment: composition failed, forwarding original request", "error", err)

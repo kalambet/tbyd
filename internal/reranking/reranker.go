@@ -134,10 +134,6 @@ collect:
 		}
 	}
 
-	if len(filtered) == 0 {
-		return chunks, nil
-	}
-
 	// Sort by score descending.
 	sort.Slice(filtered, func(i, j int) bool {
 		return filtered[i].Score > filtered[j].Score

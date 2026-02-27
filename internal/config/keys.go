@@ -126,8 +126,10 @@ func applyBackend(cfg *Config, b ConfigBackend) error {
 				return fmt.Errorf("reading %s: %w", s.key, err)
 			}
 			if ok && v != "" {
-				if b, err := strconv.ParseBool(v); err == nil {
-					s.apply(cfg, b)
+				if bv, err := strconv.ParseBool(v); err == nil {
+					s.apply(cfg, bv)
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] could not parse bool from config key %s=%q: %v. Using default value.\n", s.key, v, err)
 				}
 			}
 		case kFloat:
@@ -138,6 +140,8 @@ func applyBackend(cfg *Config, b ConfigBackend) error {
 			if ok && v != "" {
 				if f, err := strconv.ParseFloat(v, 64); err == nil {
 					s.apply(cfg, f)
+				} else {
+					fmt.Fprintf(os.Stderr, "[WARN] could not parse float from config key %s=%q: %v. Using default value.\n", s.key, v, err)
 				}
 			}
 		}
