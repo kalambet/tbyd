@@ -153,20 +153,14 @@ func TestLLMReranker_Timeout(t *testing.T) {
 	result, err := r.Rerank(context.Background(), "query", chunks)
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Rerank took %v, want < 500ms (2.5x timeout)", elapsed)
 	}
-	// Graceful degradation: original chunks returned unchanged.
-	if len(result) != len(chunks) {
-		t.Errorf("got %d chunks, want %d (original)", len(result), len(chunks))
-	}
-	for i, ch := range result {
-		if ch.Score != chunks[i].Score {
-			t.Errorf("result[%d].Score = %g, want original %g", i, ch.Score, chunks[i].Score)
-		}
+	if result != nil {
+		t.Errorf("expected nil result on timeout, got %d chunks", len(result))
 	}
 }
 
@@ -321,5 +315,22 @@ func TestNewReranker_Disabled(t *testing.T) {
 	r := NewReranker(nil, "", false, 0, 0, 0)
 	if _, ok := r.(*NoOpReranker); !ok {
 		t.Errorf("NewReranker(enabled=false) returned %T, want *NoOpReranker", r)
+	}
+}
+
+func TestNewReranker_NilEngine(t *testing.T) {
+	// Enabled but nil engine must fall back to NoOpReranker rather than panic later.
+	r := NewReranker(nil, "phi3.5", true, 5*time.Second, 0.3, 5)
+	if _, ok := r.(*NoOpReranker); !ok {
+		t.Errorf("NewReranker(enabled=true, eng=nil) returned %T, want *NoOpReranker", r)
+	}
+	// Verify it works without panicking.
+	chunks := makeChunks(2, 0.8)
+	result, err := r.Rerank(context.Background(), "query", chunks)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("got %d chunks, want 2", len(result))
 	}
 }

@@ -22,12 +22,16 @@ type Reranker interface {
 }
 
 // NewReranker returns an LLMReranker if enabled, NoOpReranker otherwise.
+// Falls back to NoOpReranker if enabled is true but eng is nil.
 //
 // topK controls the early-return threshold: once topK chunks have been scored,
 // the reranker returns that subset immediately without waiting for remaining
 // chunks. Set topK to 0 (or >= len(chunks)) to disable early return.
 func NewReranker(eng engine.Engine, model string, enabled bool, timeout time.Duration, threshold float64, topK int) Reranker {
-	if !enabled {
+	if !enabled || eng == nil {
+		if enabled && eng == nil {
+			slog.Warn("reranker: enabled but engine is nil, falling back to no-op")
+		}
 		return &NoOpReranker{}
 	}
 	return &LLMReranker{
@@ -51,8 +55,8 @@ type LLMReranker struct {
 }
 
 // Rerank scores each chunk against the query and returns a filtered, sorted
-// result set. If the timeout fires before scoring completes, the original
-// chunk order is returned unchanged (graceful degradation).
+// result set. Returns an error if the timeout fires before enough chunks are
+// scored; the caller is expected to fall back to the original order.
 func (r *LLMReranker) Rerank(ctx context.Context, query string, chunks []retrieval.ContextChunk) ([]retrieval.ContextChunk, error) {
 	if len(chunks) == 0 {
 		return chunks, nil
@@ -84,14 +88,9 @@ func (r *LLMReranker) Rerank(ctx context.Context, query string, chunks []retriev
 			}
 			defer func() { <-sem }()
 
-			score, err := r.scoreChunk(timeoutCtx, query, chunk)
-			if err != nil {
-				if timeoutCtx.Err() != nil {
-					return // context cancelled — don't send partial result
-				}
-				slog.Debug("reranker: score failed, retaining original", "error", err)
-				results <- chunk // original score preserved
-				return
+			score := r.scoreChunk(timeoutCtx, query, chunk)
+			if timeoutCtx.Err() != nil {
+				return // context cancelled during scoring — don't send result
 			}
 			chunk.Score = float32(score)
 			results <- chunk
@@ -117,8 +116,8 @@ collect:
 				break collect
 			}
 		case <-timeoutCtx.Done():
-			// Hard timeout hit before enough chunks were scored: graceful degradation.
-			return chunks, nil
+			// Hard timeout: signal failure so the caller can log and fall back.
+			return nil, fmt.Errorf("reranking timed out after %s", r.timeout)
 		}
 	}
 
@@ -142,7 +141,10 @@ collect:
 	return filtered, nil
 }
 
-func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrieval.ContextChunk) (float64, error) {
+// scoreChunk asks the LLM to rate the relevance of chunk to query.
+// Always returns a score: the LLM-provided value on success, or the chunk's
+// original retrieval score on any failure (chat error or parse error).
+func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrieval.ContextChunk) float64 {
 	prompt := "Rate the relevance of the following text to the query on a scale of 0.0 to 1.0.\n" +
 		"Query: " + query + "\n" +
 		"Text: " + chunk.Text + "\n" +
@@ -160,15 +162,18 @@ func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrie
 		{Role: "user", Content: prompt},
 	}, schema)
 	if err != nil {
-		return float64(chunk.Score), err
+		if ctx.Err() == nil {
+			slog.Debug("reranker: chat failed, retaining original score", "error", err)
+		}
+		return float64(chunk.Score)
 	}
 
 	score, parseErr := parseScore(resp, chunk.Score)
 	if parseErr != nil {
 		slog.Debug("reranker: parse failed, using original score", "resp", resp, "error", parseErr)
-		return float64(chunk.Score), nil
+		return float64(chunk.Score)
 	}
-	return score, nil
+	return score
 }
 
 // parseScore robustly extracts a relevance score float from an LLM response.
@@ -181,12 +186,10 @@ func (r *LLMReranker) scoreChunk(ctx context.Context, query string, chunk retrie
 func parseScore(resp string, originalScore float32) (float64, error) {
 	s := strings.TrimSpace(resp)
 
-	// Strip markdown code fences.
+	// Strip markdown code fences safely using TrimPrefix.
 	if idx := strings.Index(s, "```"); idx != -1 {
 		s = s[idx+3:]
-		if strings.HasPrefix(s, "json") {
-			s = s[4:]
-		}
+		s = strings.TrimSpace(strings.TrimPrefix(s, "json"))
 		if end := strings.Index(s, "```"); end != -1 {
 			s = s[:end]
 		}
