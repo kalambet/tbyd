@@ -908,7 +908,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.6** Prompt composer (structured format)
 - [x] **1.7** Enrichment pipeline orchestrator
 - [x] **1.8** Hybrid retrieval (BM25 + vector search with adaptive blending)
-- [ ] **1.9** Retrieval reranking (cross-encoder / LLM-based)
+- [x] **1.9** Retrieval reranking (cross-encoder / LLM-based)
 - [ ] **1.10** Query-level caching (exact + semantic)
 
 ### Phase 2 — User Surfaces
