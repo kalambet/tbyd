@@ -163,10 +163,14 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 	)
 
 	// 6. Store result in cache.
+	// Snapshot the duration now — the defer updates meta.EnrichmentDurationMs
+	// after return, so the cached copy would otherwise record 0.
 	if e.cache != nil {
+		metaForCache := meta
+		metaForCache.EnrichmentDurationMs = time.Since(start).Milliseconds()
 		e.cache.Set(ctx, lastUserMsg, queryEmbedding, cache.CachedEnrichment{
 			EnrichedRequest: enriched,
-			Metadata:        meta,
+			Metadata:        metaForCache,
 			Topics:          extracted.Topics,
 			ProfileVersion:  profileVersion,
 		})

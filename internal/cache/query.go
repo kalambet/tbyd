@@ -51,6 +51,11 @@ func (realClock) Now() time.Time { return time.Now() }
 // single-user local tool. The cap also bounds L2 scan latency.
 const defaultMaxSemanticSize = 5000
 
+// defaultMaxExactSize caps the exact cache map to prevent unbounded memory growth.
+// Each entry holds a CachedEnrichment (full ChatRequest + metadata). 10 000 unique
+// queries within a 5-minute TTL window is well beyond realistic single-user traffic.
+const defaultMaxExactSize = 10000
+
 // QueryCache provides two-level caching: exact match (L1) and semantic (L2).
 type QueryCache struct {
 	mu               sync.RWMutex
@@ -65,6 +70,7 @@ type QueryCache struct {
 	exactTTL         time.Duration
 	semanticTTL      time.Duration
 	maxSemanticSize   int
+	maxExactSize      int
 	stopEviction      chan struct{}
 	minProfileVersion int64 // bumped on Invalidate(); rejects entries with older ProfileVersion
 }
@@ -83,6 +89,7 @@ func NewQueryCache(embedder Embedder, enabled bool, semThreshold float64, exactT
 		exactTTL:        exactTTL,
 		semanticTTL:     semanticTTL,
 		maxSemanticSize: defaultMaxSemanticSize,
+		maxExactSize:    defaultMaxExactSize,
 		stopEviction:    make(chan struct{}),
 	}
 
@@ -106,6 +113,7 @@ func NewQueryCacheWithClock(embedder Embedder, enabled bool, semThreshold float6
 		exactTTL:        exactTTL,
 		semanticTTL:     semanticTTL,
 		maxSemanticSize: defaultMaxSemanticSize,
+		maxExactSize:    defaultMaxExactSize,
 		stopEviction:    make(chan struct{}),
 	}
 }
@@ -215,6 +223,10 @@ func (qc *QueryCache) Set(_ context.Context, query string, queryEmbedding []floa
 	qc.mu.Lock()
 	defer qc.mu.Unlock()
 
+	// Evict oldest exact-cache entry if at capacity.
+	if len(qc.exactCache) >= qc.maxExactSize {
+		qc.evictOldestExact()
+	}
 	qc.exactCache[hash] = result
 
 	if len(queryEmbedding) > 0 {
@@ -351,6 +363,24 @@ func (qc *QueryCache) evictExpired() {
 	}
 	qc.semanticLen = writePos
 	qc.semanticWriteIdx = writePos % qc.maxSemanticSize
+}
+
+// evictOldestExact removes the entry with the earliest CachedAt from the exact
+// cache. Called under qc.mu write lock.
+func (qc *QueryCache) evictOldestExact() {
+	var oldestHash string
+	var oldestTime time.Time
+	first := true
+	for hash, entry := range qc.exactCache {
+		if first || entry.CachedAt.Before(oldestTime) {
+			oldestHash = hash
+			oldestTime = entry.CachedAt
+			first = false
+		}
+	}
+	if !first {
+		delete(qc.exactCache, oldestHash)
+	}
 }
 
 // normalize lowercases and collapses whitespace.
