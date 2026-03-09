@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -463,7 +464,15 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 	vecResult := <-vectorCh
 	kwResult := <-keywordCh
 
-	// If both fail, return error. If one fails, use the other.
+	// If one search fails, log it but continue with the other.
+	if vecResult.err != nil {
+		slog.Warn("hybrid search: vector component failed", "error", vecResult.err)
+	}
+	if kwResult.err != nil {
+		slog.Warn("hybrid search: keyword component failed", "error", kwResult.err)
+	}
+
+	// If both fail, return error.
 	if vecResult.err != nil && kwResult.err != nil {
 		return nil, fmt.Errorf("both searches failed: vector: %w, keyword: %v", vecResult.err, kwResult.err)
 	}
