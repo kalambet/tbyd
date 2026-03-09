@@ -18,11 +18,14 @@ type OllamaChatter interface {
 
 // Intent holds the structured extraction result from a user query.
 type Intent struct {
-	IntentType   string   `json:"intent_type"`
-	Entities     []string `json:"entities"`
-	Topics       []string `json:"topics"`
-	ContextNeeds []string `json:"context_needs"`
-	IsPrivate    bool     `json:"is_private"`
+	IntentType     string   `json:"intent_type"`
+	Entities       []string `json:"entities"`
+	Topics         []string `json:"topics"`
+	ContextNeeds   []string `json:"context_needs"`
+	IsPrivate      bool     `json:"is_private"`
+	SearchStrategy string   `json:"search_strategy"`  // "vector_only", "hybrid", "keyword_heavy"; empty treated as "hybrid"
+	HybridRatio    float64  `json:"hybrid_ratio"`      // 0.0 = all keyword, 1.0 = all vector; default 0.7
+	SuggestedTopK  int      `json:"suggested_top_k"`   // 0 = use default
 }
 
 // Extractor uses a fast local LLM to extract structured intent from user queries.
@@ -67,11 +70,14 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []o
 var intentSchema = ollama.Schema{
 	Type: "object",
 	Properties: map[string]ollama.SchemaProperty{
-		"intent_type":   {Type: "string", Description: "One of: recall, task, question, preference_update"},
-		"entities":      {Type: "array", Description: "Named entities mentioned in the query"},
-		"topics":        {Type: "array", Description: "Semantic topic tags"},
-		"context_needs": {Type: "array", Description: "What kind of context would help answer this query"},
-		"is_private":    {Type: "boolean", Description: "Whether the user flagged this as sensitive"},
+		"intent_type":     {Type: "string", Description: "One of: recall, task, question, preference_update"},
+		"entities":        {Type: "array", Description: "Named entities mentioned in the query"},
+		"topics":          {Type: "array", Description: "Semantic topic tags"},
+		"context_needs":   {Type: "array", Description: "What kind of context would help answer this query"},
+		"is_private":      {Type: "boolean", Description: "Whether the user flagged this as sensitive"},
+		"search_strategy": {Type: "string", Description: "One of: vector_only, hybrid, keyword_heavy"},
+		"hybrid_ratio":    {Type: "number", Description: "0.0 = all keyword, 1.0 = all vector; default 0.7"},
+		"suggested_top_k": {Type: "integer", Description: "Suggested number of results; 0 = use default"},
 	},
 	Required: []string{"intent_type", "entities", "topics", "context_needs", "is_private"},
 }

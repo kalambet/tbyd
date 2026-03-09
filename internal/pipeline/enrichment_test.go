@@ -69,6 +69,15 @@ func (m *mockVectorStore) Search(table string, vector []float32, topK int, filte
 	}
 	return m.searchResults, nil
 }
+func (m *mockVectorStore) SearchKeyword(table string, query string, topK int, filter string) ([]retrieval.ScoredRecord, error) {
+	return nil, nil
+}
+func (m *mockVectorStore) SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]retrieval.ScoredRecord, error) {
+	if m.searchErr != nil {
+		return nil, m.searchErr
+	}
+	return m.searchResults, nil
+}
 func (m *mockVectorStore) GetByIDs(ctx context.Context, table string, ids []string) ([]retrieval.Record, error) {
 	return nil, nil
 }

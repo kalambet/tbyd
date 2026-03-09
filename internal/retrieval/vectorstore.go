@@ -43,6 +43,17 @@ type VectorStore interface {
 
 	// Count returns the number of records in the given table.
 	Count(table string) (int, error)
+
+	// SearchKeyword performs BM25 keyword search via FTS5, returning top-K results.
+	// The query is matched against the text_chunk column using FTS5 MATCH syntax.
+	// Scores are normalized to the 0–1 range using min-max normalization.
+	SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error)
+
+	// SearchHybrid combines vector similarity search and BM25 keyword search,
+	// fusing their scores using either Reciprocal Rank Fusion (RRF) or weighted
+	// blending. vectorWeight controls the blend ratio (0.0 = all keyword,
+	// 1.0 = all vector). Results are deduplicated by record ID.
+	SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
 }
 
 // Record represents a row in the vector store.

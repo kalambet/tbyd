@@ -11,17 +11,31 @@ import (
 
 // mockVectorStore implements VectorStore for testing.
 type mockVectorStore struct {
-	searchFn    func(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error)
-	insertFn    func(table string, records []Record) error
-	getByIDsFn  func(ctx context.Context, table string, ids []string) ([]Record, error)
-	deleteFn    func(table string, id string) error
-	createFn    func(name string) error
-	exportAllFn func(table string) ([]Record, error)
-	countFn     func(table string) (int, error)
+	searchFn        func(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error)
+	searchKeywordFn func(table string, query string, topK int, filter string) ([]ScoredRecord, error)
+	searchHybridFn  func(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
+	insertFn        func(table string, records []Record) error
+	getByIDsFn      func(ctx context.Context, table string, ids []string) ([]Record, error)
+	deleteFn        func(table string, id string) error
+	createFn        func(name string) error
+	exportAllFn     func(table string) ([]Record, error)
+	countFn         func(table string) (int, error)
 }
 
 func (m *mockVectorStore) Search(table string, vector []float32, topK int, filter string) ([]ScoredRecord, error) {
 	return m.searchFn(table, vector, topK, filter)
+}
+func (m *mockVectorStore) SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error) {
+	if m.searchKeywordFn != nil {
+		return m.searchKeywordFn(table, query, topK, filter)
+	}
+	return nil, nil
+}
+func (m *mockVectorStore) SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error) {
+	if m.searchHybridFn != nil {
+		return m.searchHybridFn(table, vector, query, topK, vectorWeight, filter)
+	}
+	return nil, nil
 }
 func (m *mockVectorStore) Insert(table string, records []Record) error {
 	if m.insertFn != nil {
@@ -83,7 +97,8 @@ func TestRetrieveForIntent_NoEntities(t *testing.T) {
 	retriever := NewRetriever(embedder, store)
 
 	chunks := retriever.RetrieveForIntent(context.Background(), "test query", intent.Intent{
-		IntentType: "question",
+		IntentType:     "question",
+		SearchStrategy: "vector_only",
 	}, 5)
 
 	if embedCalls != 1 {
@@ -123,8 +138,9 @@ func TestRetrieveForIntent_WithEntities(t *testing.T) {
 	retriever := NewRetriever(embedder, store)
 
 	chunks := retriever.RetrieveForIntent(context.Background(), "test query", intent.Intent{
-		IntentType: "recall",
-		Entities:   []string{"database schema", "migrations"},
+		IntentType:     "recall",
+		Entities:       []string{"database schema", "migrations"},
+		SearchStrategy: "vector_only",
 	}, 5)
 
 	// 1 query embed + 2 entity embeds = 3
@@ -168,8 +184,9 @@ func TestRetrieveForIntent_Deduplication(t *testing.T) {
 	retriever := NewRetriever(embedder, store)
 
 	chunks := retriever.RetrieveForIntent(context.Background(), "query", intent.Intent{
-		IntentType: "recall",
-		Entities:   []string{"entity1"},
+		IntentType:     "recall",
+		Entities:       []string{"entity1"},
+		SearchStrategy: "vector_only",
 	}, 5)
 
 	// "shared-src" appears in both searches; should be deduplicated.
@@ -209,7 +226,8 @@ func TestRetrieveForIntent_TopKRespected(t *testing.T) {
 	retriever := NewRetriever(embedder, store)
 
 	chunks := retriever.RetrieveForIntent(context.Background(), "query", intent.Intent{
-		IntentType: "question",
+		IntentType:     "question",
+		SearchStrategy: "vector_only",
 	}, 3)
 
 	if len(chunks) != 3 {
@@ -234,7 +252,8 @@ func TestRetrieveForIntent_EmptyKnowledgeBase(t *testing.T) {
 	retriever := NewRetriever(embedder, store)
 
 	chunks := retriever.RetrieveForIntent(context.Background(), "query", intent.Intent{
-		IntentType: "question",
+		IntentType:     "question",
+		SearchStrategy: "vector_only",
 	}, 5)
 
 	if len(chunks) != 0 {
@@ -254,11 +273,16 @@ func TestRetrieveForIntent_EmbedFails(t *testing.T) {
 			t.Fatal("search should not be called when embed fails")
 			return nil, nil
 		},
+		searchHybridFn: func(_ string, _ []float32, _ string, _ int, _ float32, _ string) ([]ScoredRecord, error) {
+			t.Fatal("search should not be called when embed fails")
+			return nil, nil
+		},
 	}
 
 	embedder := NewEmbedder(eng, "nomic-embed-text")
 	retriever := NewRetriever(embedder, store)
 
+	// Default strategy is "hybrid", embed fails → graceful degradation.
 	chunks := retriever.RetrieveForIntent(context.Background(), "query", intent.Intent{
 		IntentType: "question",
 	}, 5)
