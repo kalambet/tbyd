@@ -229,7 +229,8 @@ func extractLastUserMessage(raw json.RawMessage) string {
 			}
 			return strings.Join(texts, " ")
 		}
-		return ""
+		// Unparseable content format — try earlier user messages.
+		continue
 	}
 	return ""
 }

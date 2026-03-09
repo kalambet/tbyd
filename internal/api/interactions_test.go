@@ -304,6 +304,11 @@ func TestExtractLastUserMessage(t *testing.T) {
 			messages: `invalid`,
 			want:     "",
 		},
+		{
+			name:     "unparseable content falls through to earlier user message",
+			messages: `[{"role":"user","content":"first"},{"role":"user","content":42}]`,
+			want:     "first",
+		},
 	}
 
 	for _, tt := range tests {

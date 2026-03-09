@@ -197,34 +197,7 @@ func (c *Client) Chat(ctx context.Context, model string, messages []Message, jso
 	if jsonSchema != nil {
 		cr.Format = jsonSchema
 	}
-
-	body, err := json.Marshal(cr)
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("creating chat request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("chat request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("chat: unexpected status %d", resp.StatusCode)
-	}
-
-	var result chatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decoding chat response: %w", err)
-	}
-
-	return result.Message.Content, nil
+	return c.doChatRequest(ctx, cr)
 }
 
 // ChatWithOptions is like Chat but accepts Ollama model options (e.g. temperature).
@@ -238,7 +211,11 @@ func (c *Client) ChatWithOptions(ctx context.Context, model string, messages []M
 	if jsonSchema != nil {
 		cr.Format = jsonSchema
 	}
+	return c.doChatRequest(ctx, cr)
+}
 
+// doChatRequest marshals, sends, and decodes a chat request.
+func (c *Client) doChatRequest(ctx context.Context, cr chatRequest) (string, error) {
 	body, err := json.Marshal(cr)
 	if err != nil {
 		return "", err
