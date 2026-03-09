@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -306,7 +307,7 @@ func TestGetInteraction(t *testing.T) {
 		Status:    "completed",
 		VectorIDs: "[]",
 	}
-	if err := store.SaveInteraction(interaction); err != nil {
+	if err := store.SaveInteraction(context.Background(), interaction); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 

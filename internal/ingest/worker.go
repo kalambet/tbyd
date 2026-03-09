@@ -39,6 +39,10 @@ type Summarizer interface {
 	Summarize(ctx context.Context, userQuery, cloudResponse string) (string, error)
 }
 
+// interactionIDNamespacePrefix is the namespace prefix used to derive
+// deterministic vector IDs from interaction IDs via uuid.NewSHA1.
+const interactionIDNamespacePrefix = "interaction:"
+
 // Worker processes ingest_enrich and interaction_summarize jobs from the SQLite job queue.
 type Worker struct {
 	store      JobStore
@@ -174,9 +178,10 @@ type summarizePayload struct {
 
 func (w *Worker) processSummarizeJob(ctx context.Context, job *storage.Job) error {
 	if w.summarizer == nil {
-		// No summarizer configured — skip gracefully instead of burning retries.
-		w.logger.Debug("skipping interaction_summarize job: no summarizer configured", "job_id", job.ID)
-		return nil
+		// Return an error so the job is retried/failed rather than silently
+		// completed. This preserves the ability to reprocess interactions
+		// once a summarizer model is configured.
+		return fmt.Errorf("no summarizer configured; job will be retried when a model is available")
 	}
 
 	var payload summarizePayload
@@ -212,7 +217,7 @@ func (w *Worker) processSummarizeJob(ctx context.Context, job *storage.Job) erro
 	// retries are idempotent. If a previous attempt inserted the vector but
 	// failed to update interaction.vector_ids, the next attempt overwrites
 	// the same record instead of creating an orphan.
-	vectorID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("interaction:"+interaction.ID)).String()
+	vectorID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(interactionIDNamespacePrefix+interaction.ID)).String()
 
 	rec := retrieval.Record{
 		ID:         vectorID,

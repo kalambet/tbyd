@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,9 +23,11 @@ import (
 const maxRequestBodySize = 1 << 20 // 1MB
 
 // InteractionSaver persists interactions and enqueues summarization jobs.
+// All methods accept a context so that implementations can use context-aware
+// database calls (e.g. ExecContext), enabling graceful cancellation on shutdown.
 type InteractionSaver interface {
-	SaveInteraction(i storage.Interaction) error
-	EnqueueJob(job storage.Job) error
+	SaveInteraction(ctx context.Context, i storage.Interaction) error
+	EnqueueJob(ctx context.Context, job storage.Job) error
 }
 
 // interactionRecord holds all data needed to persist an interaction.
@@ -33,6 +36,7 @@ type interactionRecord struct {
 	EnrichedPrompt string
 	Model          string
 	CloudResponse  string
+	Status         string // "completed" or "aborted"
 }
 
 // interactionSaveLoop drains the save channel until ctx is cancelled,
@@ -42,11 +46,13 @@ func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan 
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain buffered interactions on shutdown to avoid silent data loss.
+			// Drain buffered interactions on shutdown using a background
+			// context so the database calls are not already cancelled.
+			drainCtx := context.Background()
 			for {
 				select {
 				case rec := <-ch:
-					doSaveInteraction(saver, rec, enqueueSummarize)
+					doSaveInteraction(drainCtx, saver, rec, enqueueSummarize)
 				default:
 					return
 				}
@@ -55,7 +61,7 @@ func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan 
 			if !ok {
 				return
 			}
-			doSaveInteraction(saver, rec, enqueueSummarize)
+			doSaveInteraction(ctx, saver, rec, enqueueSummarize)
 		}
 	}
 }
@@ -74,21 +80,27 @@ func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipelin
 
 	// Start a bounded save channel and single consumer goroutine.
 	var saveCh chan interactionRecord
+	var droppedInteractions atomic.Int64
 	if saveInteractions && saver != nil {
 		saveCh = make(chan interactionRecord, 64)
 		go interactionSaveLoop(appCtx, saver, saveCh, enqueueSummarize)
 	}
 
-	r.Get("/health", handleHealth)
+	r.Get("/health", handleHealth(&droppedInteractions))
 	r.Get("/v1/models", handleModels(p))
-	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh))
+	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh, &droppedInteractions))
 
 	return r
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"ok"}`))
+func handleHealth(droppedInteractions *atomic.Int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":               "ok",
+			"dropped_interactions": droppedInteractions.Load(),
+		})
+	}
 }
 
 func handleModels(p *proxy.Client) http.HandlerFunc {
@@ -107,7 +119,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 	}
 }
 
-func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh chan<- interactionRecord) http.HandlerFunc {
+func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh chan<- interactionRecord, droppedInteractions *atomic.Int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		defer r.Body.Close()
@@ -153,8 +165,13 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 
 		var responseBody string
 		var upstreamModel string
+		status := "completed"
 		if req.Stream {
-			responseBody, upstreamModel = streamResponseCapture(w, rc)
+			var streamOK bool
+			responseBody, upstreamModel, streamOK = streamResponseCapture(w, rc)
+			if !streamOK {
+				status = "aborted"
+			}
 		} else {
 			body, err := io.ReadAll(rc)
 			if err != nil {
@@ -186,11 +203,15 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 				EnrichedPrompt: enrichedPrompt,
 				Model:          model,
 				CloudResponse:  responseBody,
+				Status:         status,
 			}
 			select {
 			case saveCh <- rec:
 			default:
-				slog.Warn("interaction save channel full, dropping interaction")
+				n := droppedInteractions.Add(1)
+				slog.Warn("interaction save channel full, dropping interaction",
+					"dropped_total", n,
+				)
 			}
 		}
 	}
@@ -235,9 +256,13 @@ func extractLastUserMessage(raw json.RawMessage) string {
 	return ""
 }
 
-// doSaveInteraction persists a completed interaction and optionally enqueues a summarization job.
-func doSaveInteraction(saver InteractionSaver, rec interactionRecord, enqueueSummarize bool) {
+// doSaveInteraction persists an interaction and optionally enqueues a summarization job.
+func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interactionRecord, enqueueSummarize bool) {
 	interactionID := uuid.New().String()
+	status := rec.Status
+	if status == "" {
+		status = "completed"
+	}
 	interaction := storage.Interaction{
 		ID:             interactionID,
 		CreatedAt:      time.Now().UTC(),
@@ -245,20 +270,20 @@ func doSaveInteraction(saver InteractionSaver, rec interactionRecord, enqueueSum
 		EnrichedPrompt: rec.EnrichedPrompt,
 		CloudModel:     rec.Model,
 		CloudResponse:  rec.CloudResponse,
-		Status:         "completed",
+		Status:         status,
 		VectorIDs:      "[]",
 	}
 
-	if err := saver.SaveInteraction(interaction); err != nil {
+	if err := saver.SaveInteraction(ctx, interaction); err != nil {
 		slog.Error("failed to save interaction",
 			"error", err,
-			"interaction_id", interactionID,
+			"ephemeral_id", interactionID,
 			"model", rec.Model,
 		)
 		return
 	}
 
-	if !enqueueSummarize {
+	if !enqueueSummarize || status != "completed" {
 		return
 	}
 
@@ -273,20 +298,22 @@ func doSaveInteraction(saver InteractionSaver, rec interactionRecord, enqueueSum
 		Type:        "interaction_summarize",
 		PayloadJSON: string(payload),
 	}
-	if err := saver.EnqueueJob(job); err != nil {
+	if err := saver.EnqueueJob(ctx, job); err != nil {
 		slog.Error("failed to enqueue summarize job", "error", err, "interaction_id", interactionID)
 	}
 }
 
 // streamResponseCapture streams SSE events to the client while reassembling
 // the assistant's content from streaming delta chunks. Returns the reassembled
-// content as a synthetic non-streaming response JSON for storage, and the
-// upstream model name extracted from SSE chunks.
-func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string) {
+// content as a synthetic non-streaming response JSON for storage, the upstream
+// model name extracted from SSE chunks, and whether the stream completed
+// successfully (received [DONE]). An incomplete stream returns false so the
+// caller can mark the interaction as aborted.
+func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string, bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
-		return "", ""
+		return "", "", false
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -295,6 +322,7 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string)
 
 	var contentBuilder strings.Builder
 	var streamModel string
+	streamDone := false
 
 	reader := bufio.NewReader(rc)
 	for {
@@ -307,7 +335,9 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string)
 			trimmed := strings.TrimSpace(string(line))
 			if strings.HasPrefix(trimmed, "data: ") {
 				data := strings.TrimPrefix(trimmed, "data: ")
-				if data != "[DONE]" {
+				if data == "[DONE]" {
+					streamDone = true
+				} else {
 					var chunk struct {
 						Model   string `json:"model"`
 						Choices []struct {
@@ -351,7 +381,7 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string)
 	// extractAssistantContent can parse it uniformly.
 	assembled := contentBuilder.String()
 	if assembled == "" {
-		return "", streamModel
+		return "", streamModel, streamDone
 	}
 	synth, err := json.Marshal(map[string]any{
 		"model": streamModel,
@@ -366,9 +396,9 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string)
 	})
 	if err != nil {
 		slog.Error("failed to marshal synthetic stream response", "error", err)
-		return "", streamModel
+		return "", streamModel, streamDone
 	}
-	return string(synth), streamModel
+	return string(synth), streamModel, streamDone
 }
 
 func hasMessages(raw json.RawMessage) bool {

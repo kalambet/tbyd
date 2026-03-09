@@ -201,7 +201,7 @@ func runServer() error {
 
 	// Build ingest worker with optional interaction summarizer.
 	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
-	hasSummarizer := false
+	enqueueSummarize := false
 	summarizeModel := cfg.Ollama.DeepModel
 	if summarizeModel == "" {
 		summarizeModel = cfg.Ollama.FastModel
@@ -209,7 +209,7 @@ func runServer() error {
 	if summarizeModel != "" {
 		summarizer := ingest.NewLLMSummarizer(&engineChatAdapter{eng: eng}, summarizeModel)
 		worker.SetSummarizer(summarizer)
-		hasSummarizer = true
+		enqueueSummarize = true
 	} else {
 		slog.Warn("no model configured for interaction summarization; summaries will be skipped")
 	}
@@ -217,7 +217,7 @@ func runServer() error {
 
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	openaiHandler := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, hasSummarizer)
+	openaiHandler := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize)
 	appHandler := api.NewAppHandler(api.AppDeps{
 		Store:      store,
 		Profile:    profileMgr,
@@ -406,7 +406,7 @@ type engineChatAdapter struct {
 	eng engine.Engine
 }
 
-func (a *engineChatAdapter) Chat(ctx context.Context, model string, messages []ingest.ChatMessage, opts *ingest.ChatOptions) (string, error) {
+func (a *engineChatAdapter) Chat(ctx context.Context, model string, messages []ingest.ChatMessage, opts *engine.ChatOptions) (string, error) {
 	engineMsgs := make([]engine.Message, len(messages))
 	for i, m := range messages {
 		engineMsgs[i] = engine.Message{Role: m.Role, Content: m.Content}
@@ -415,8 +415,7 @@ func (a *engineChatAdapter) Chat(ctx context.Context, model string, messages []i
 	// Use ChatWithOptions when the engine supports it and options are provided.
 	if opts != nil {
 		if co, ok := a.eng.(engine.ChatOptioner); ok {
-			engineOpts := engine.ChatOptions{Temperature: opts.Temperature}
-			return co.ChatWithOptions(ctx, model, engineMsgs, nil, engineOpts)
+			return co.ChatWithOptions(ctx, model, engineMsgs, nil, *opts)
 		}
 	}
 

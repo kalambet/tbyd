@@ -23,7 +23,7 @@ type mockInteractionSaver struct {
 	saveDone     chan struct{} // signalled after each successful save
 }
 
-func (m *mockInteractionSaver) SaveInteraction(i storage.Interaction) error {
+func (m *mockInteractionSaver) SaveInteraction(_ context.Context, i storage.Interaction) error {
 	if m.saveFn != nil {
 		return m.saveFn(i)
 	}
@@ -36,7 +36,7 @@ func (m *mockInteractionSaver) SaveInteraction(i storage.Interaction) error {
 	return nil
 }
 
-func (m *mockInteractionSaver) EnqueueJob(j storage.Job) error {
+func (m *mockInteractionSaver) EnqueueJob(_ context.Context, j storage.Job) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.jobs = append(m.jobs, j)

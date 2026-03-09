@@ -171,7 +171,7 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 			Type:        "ingest_enrich",
 			PayloadJSON: string(payload),
 		}
-		if err := deps.Store.EnqueueJob(job); err != nil {
+		if err := deps.Store.EnqueueJob(r.Context(), job); err != nil {
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to enqueue job: %v", err)
 			return
 		}

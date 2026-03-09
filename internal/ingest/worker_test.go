@@ -66,7 +66,7 @@ func enqueueTestJob(t *testing.T, store *storage.Store, docID, content string) {
 		Type:        "ingest_enrich",
 		PayloadJSON: string(payload),
 	}
-	if err := store.EnqueueJob(job); err != nil {
+	if err := store.EnqueueJob(context.Background(),job); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 }
@@ -267,7 +267,7 @@ func TestWorker_ConcurrentEnqueue(t *testing.T) {
 					Type:        "ingest_enrich",
 					PayloadJSON: string(payload),
 				}
-				if err := store.EnqueueJob(job); err != nil {
+				if err := store.EnqueueJob(context.Background(),job); err != nil {
 					t.Errorf("EnqueueJob %s: %v", docID, err)
 					return
 				}
@@ -341,7 +341,7 @@ func enqueueSummarizeJob(t *testing.T, store *storage.Store, interactionID, user
 		Status:        "completed",
 		VectorIDs:     "[]",
 	}
-	if err := store.SaveInteraction(interaction); err != nil {
+	if err := store.SaveInteraction(context.Background(),interaction); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 	payload, _ := json.Marshal(map[string]string{"interaction_id": interactionID})
@@ -350,7 +350,7 @@ func enqueueSummarizeJob(t *testing.T, store *storage.Store, interactionID, user
 		Type:        "interaction_summarize",
 		PayloadJSON: string(payload),
 	}
-	if err := store.EnqueueJob(job); err != nil {
+	if err := store.EnqueueJob(context.Background(),job); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 }
@@ -443,13 +443,15 @@ func TestWorker_SummarizeJob_NoSummarizer(t *testing.T) {
 		t.Fatal("RunOnce returned false")
 	}
 
-	// Job should be completed (skipped gracefully, not retried).
+	// Job should be pending (failed and queued for retry) rather than
+	// silently completed, so it can be reprocessed once a summarizer is
+	// configured.
 	var status string
 	if err := store.DB().QueryRow(`SELECT status FROM jobs WHERE id = 'job-ix-2'`).Scan(&status); err != nil {
 		t.Fatalf("query status: %v", err)
 	}
-	if status != "completed" {
-		t.Errorf("status = %q, want completed (gracefully skipped)", status)
+	if status != "pending" {
+		t.Errorf("status = %q, want pending (retry when summarizer available)", status)
 	}
 }
 

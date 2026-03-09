@@ -34,10 +34,13 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	var body map[string]string
+	var body map[string]any
 	json.NewDecoder(rr.Body).Decode(&body)
 	if body["status"] != "ok" {
 		t.Errorf("body = %v, want status=ok", body)
+	}
+	if dropped, ok := body["dropped_interactions"].(float64); !ok || dropped != 0 {
+		t.Errorf("dropped_interactions = %v, want 0", body["dropped_interactions"])
 	}
 }
 
