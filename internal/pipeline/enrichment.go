@@ -3,9 +3,11 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/kalambet/tbyd/internal/cache"
 	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/intent"
 	"github.com/kalambet/tbyd/internal/profile"
@@ -20,6 +22,8 @@ type EnrichmentMetadata struct {
 	ChunksUsed           []string
 	EnrichmentDurationMs int64
 	RerankingDurationMs  int64
+	CacheHit             bool
+	CacheLevel           string // "exact" or "semantic"
 }
 
 // Enricher orchestrates the enrichment pipeline: intent extraction, context
@@ -30,12 +34,14 @@ type Enricher struct {
 	reranker  reranking.Reranker
 	profile   *profile.Manager
 	composer  *composer.Composer
+	cache     *cache.QueryCache
 	topK      int
 }
 
 // NewEnricher creates an Enricher wired to all pipeline components.
 // topK controls how many context chunks are retrieved (default 5 if <= 0).
 // If reranker is nil, a NoOpReranker is used.
+// queryCache may be nil (caching disabled).
 func NewEnricher(
 	extractor *intent.Extractor,
 	retriever *retrieval.Retriever,
@@ -43,6 +49,7 @@ func NewEnricher(
 	comp *composer.Composer,
 	rr reranking.Reranker,
 	topK int,
+	queryCache *cache.QueryCache,
 ) *Enricher {
 	if topK <= 0 {
 		topK = 5
@@ -56,6 +63,7 @@ func NewEnricher(
 		reranker:  rr,
 		profile:   profileMgr,
 		composer:  comp,
+		cache:     queryCache,
 		topK:      topK,
 	}
 }
@@ -67,11 +75,13 @@ func NewEnricher(
 const candidateMultiplier = 4
 
 // Enrich runs the full enrichment pipeline on the incoming request:
+//  0. Check query cache (exact then semantic) — return early on hit
 //  1. Extract intent from the last user message (3s timeout, fallback on failure)
 //  2. Retrieve a larger candidate pool (topK×4) for reranking
 //  3. Rerank candidates by query relevance and trim to topK
 //  4. Load user profile summary
 //  5. Compose the enriched request
+//  6. Store result in cache
 //
 // On failure at any step, the pipeline degrades gracefully — the original
 // request is enriched with whatever context is available.
@@ -81,8 +91,33 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		meta.EnrichmentDurationMs = time.Since(start).Milliseconds()
 	}()
 
-	// 1. Extract intent from last user message.
 	lastUserMsg := extractLastUserMessage(req.Messages)
+
+	// 0. Check cache.
+	var queryEmbedding []float32
+	if e.cache != nil {
+		cr := e.cache.Get(ctx, lastUserMsg)
+		if cr.Hit {
+			if m, ok := cr.Entry.Metadata.(EnrichmentMetadata); ok {
+				meta = m
+			} else {
+				slog.Warn("cache: metadata type mismatch, dropping cached metrics",
+					"type", fmt.Sprintf("%T", cr.Entry.Metadata))
+			}
+			meta.CacheHit = true
+			meta.CacheLevel = cr.CacheLevel
+			// EnrichmentDurationMs is set by the defer on return.
+			return cr.Entry.EnrichedRequest, meta
+		}
+		queryEmbedding = cr.Embedding // reuse embedding from L2 lookup
+	}
+
+	// Capture profile version before pipeline work begins. If the profile
+	// changes mid-pipeline, the stored cache entry will carry an older version
+	// and be rejected on subsequent Get calls (see QueryCache.minProfileVersion).
+	profileVersion := e.profile.ProfileVersion()
+
+	// 1. Extract intent from last user message.
 	extracted := e.extractor.Extract(ctx, lastUserMsg, nil, "")
 	if extracted.IntentType != "" {
 		meta.IntentExtracted = true
@@ -126,6 +161,16 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		"intent_extracted", meta.IntentExtracted,
 		"chunks_used", len(meta.ChunksUsed),
 	)
+
+	// 6. Store result in cache.
+	if e.cache != nil {
+		e.cache.Set(ctx, lastUserMsg, queryEmbedding, cache.CachedEnrichment{
+			EnrichedRequest: enriched,
+			Metadata:        meta,
+			Topics:          extracted.Topics,
+			ProfileVersion:  profileVersion,
+		})
+	}
 
 	out = enriched
 	return

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kalambet/tbyd/internal/cache"
 	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/engine"
 	"github.com/kalambet/tbyd/internal/intent"
@@ -141,7 +142,7 @@ func buildEnricher(chatter *mockChatter, eng *mockEngine, vs *mockVectorStore, p
 	ret := retrieval.NewRetriever(embedder, vs)
 	profileMgr := profile.NewManager(ps)
 	comp := composer.New(4000)
-	return NewEnricher(extractor, ret, profileMgr, comp, &reranking.NoOpReranker{}, 5)
+	return NewEnricher(extractor, ret, profileMgr, comp, &reranking.NoOpReranker{}, 5, nil)
 }
 
 // mockReranker for testing reranker integration in the pipeline.
@@ -162,7 +163,7 @@ func buildEnricherWith(chatter *mockChatter, eng *mockEngine, vs *mockVectorStor
 	ret := retrieval.NewRetriever(embedder, vs)
 	profileMgr := profile.NewManager(ps)
 	comp := composer.New(4000)
-	return NewEnricher(extractor, ret, profileMgr, comp, rr, 5)
+	return NewEnricher(extractor, ret, profileMgr, comp, rr, 5, nil)
 }
 
 // --- tests ---
@@ -557,5 +558,208 @@ func TestExtractLastUserMessage(t *testing.T) {
 				t.Errorf("extractLastUserMessage() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- cache mock embedder ---
+
+type mockCacheEmbedder struct {
+	embedFn func(ctx context.Context, text string) ([]float32, error)
+}
+
+func (m *mockCacheEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if m.embedFn != nil {
+		return m.embedFn(ctx, text)
+	}
+	return make([]float32, 768), nil
+}
+
+type mockClock struct {
+	now time.Time
+}
+
+func (c *mockClock) Now() time.Time { return c.now }
+
+// --- cache integration tests ---
+
+func TestEnrich_CacheHit(t *testing.T) {
+	chatter := &mockChatter{
+		chatFn: func(ctx context.Context, model string, msgs []ollama.Message, schema *ollama.Schema) (string, error) {
+			t.Fatal("extractor should NOT be called on cache hit")
+			return "", nil
+		},
+	}
+	eng := &mockEngine{
+		embedFn: func(ctx context.Context, model string, text string) ([]float32, error) {
+			t.Fatal("engine embed should NOT be called on cache hit")
+			return nil, nil
+		},
+	}
+	vs := &mockVectorStore{}
+	ps := &mockProfileStore{}
+
+	// Create cache and pre-populate it.
+	cacheEmb := &mockCacheEmbedder{
+		embedFn: func(ctx context.Context, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	clock := &mockClock{now: time.Now()}
+	qc := cache.NewQueryCacheWithClock(cacheEmb, true, 0.92, 5*time.Minute, 30*time.Minute, clock)
+
+	// Pre-populate cache with a result.
+	cachedReq := proxy.ChatRequest{Model: "cached-model"}
+	cachedMeta := EnrichmentMetadata{
+		IntentExtracted:      true,
+		ChunksUsed:           []string{"cached-chunk-1"},
+		EnrichmentDurationMs: 42,
+	}
+	qc.Set(context.Background(), "tell me about Go", nil, cache.CachedEnrichment{
+		EnrichedRequest: cachedReq,
+		Metadata:        cachedMeta,
+		Topics:          []string{"programming"},
+	})
+
+	enricher := NewEnricher(
+		intent.NewExtractor(chatter, "test-fast"),
+		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
+		profile.NewManager(ps),
+		composer.New(4000),
+		&reranking.NoOpReranker{},
+		5,
+		qc,
+	)
+
+	enriched, meta := enricher.Enrich(context.Background(), makeReq("tell me about Go"))
+
+	if !meta.CacheHit {
+		t.Fatal("expected CacheHit to be true")
+	}
+	if meta.CacheLevel != "exact" {
+		t.Errorf("CacheLevel = %q, want \"exact\"", meta.CacheLevel)
+	}
+	if enriched.Model != "cached-model" {
+		t.Errorf("Model = %q, want \"cached-model\"", enriched.Model)
+	}
+}
+
+func TestEnrich_CacheMiss(t *testing.T) {
+	extractorCalled := false
+	chatter := &mockChatter{
+		chatFn: func(ctx context.Context, model string, msgs []ollama.Message, schema *ollama.Schema) (string, error) {
+			extractorCalled = true
+			return `{"intent_type":"question","entities":[],"topics":["go"],"context_needs":[],"is_private":false}`, nil
+		},
+	}
+	eng := &mockEngine{
+		embedFn: func(ctx context.Context, model string, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	vs := &mockVectorStore{
+		searchResults: []retrieval.ScoredRecord{
+			{Record: retrieval.Record{ID: "chunk-1", SourceID: "src-1", TextChunk: "Go is great"}, Score: 0.9},
+		},
+	}
+	ps := &mockProfileStore{
+		keys: map[string]string{"identity.role": "engineer"},
+	}
+
+	cacheEmb := &mockCacheEmbedder{
+		embedFn: func(ctx context.Context, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	clock := &mockClock{now: time.Now()}
+	qc := cache.NewQueryCacheWithClock(cacheEmb, true, 0.92, 5*time.Minute, 30*time.Minute, clock)
+
+	enricher := NewEnricher(
+		intent.NewExtractor(chatter, "test-fast"),
+		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
+		profile.NewManager(ps),
+		composer.New(4000),
+		&reranking.NoOpReranker{},
+		5,
+		qc,
+	)
+
+	_, meta := enricher.Enrich(context.Background(), makeReq("tell me about Go"))
+
+	if !extractorCalled {
+		t.Error("expected extractor to be called on cache miss")
+	}
+	if meta.CacheHit {
+		t.Error("expected CacheHit to be false on first call")
+	}
+
+	// Second call with same query should be a cache hit.
+	extractorCalled = false
+	_, meta2 := enricher.Enrich(context.Background(), makeReq("tell me about Go"))
+
+	if extractorCalled {
+		t.Error("extractor should NOT be called on cache hit (second call)")
+	}
+	if !meta2.CacheHit {
+		t.Error("expected CacheHit to be true on second call")
+	}
+}
+
+func TestEnrich_CacheInvalidatedOnProfileUpdate(t *testing.T) {
+	chatter := &mockChatter{
+		chatFn: func(ctx context.Context, model string, msgs []ollama.Message, schema *ollama.Schema) (string, error) {
+			return `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":false}`, nil
+		},
+	}
+	eng := &mockEngine{
+		embedFn: func(ctx context.Context, model string, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	vs := &mockVectorStore{
+		searchResults: []retrieval.ScoredRecord{
+			{Record: retrieval.Record{ID: "c1", SourceID: "s1", TextChunk: "context"}, Score: 0.9},
+		},
+	}
+	ps := &mockProfileStore{
+		keys: map[string]string{"identity.role": "engineer"},
+	}
+
+	cacheEmb := &mockCacheEmbedder{
+		embedFn: func(ctx context.Context, text string) ([]float32, error) {
+			return make([]float32, 768), nil
+		},
+	}
+	clock := &mockClock{now: time.Now()}
+	qc := cache.NewQueryCacheWithClock(cacheEmb, true, 0.92, 5*time.Minute, 30*time.Minute, clock)
+
+	profileMgr := profile.NewManager(ps)
+	profileMgr.OnInvalidate(func() { qc.Invalidate() })
+
+	enricher := NewEnricher(
+		intent.NewExtractor(chatter, "test-fast"),
+		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
+		profileMgr,
+		composer.New(4000),
+		&reranking.NoOpReranker{},
+		5,
+		qc,
+	)
+
+	// First call populates cache.
+	enricher.Enrich(context.Background(), makeReq("test query"))
+
+	// Verify cache hit.
+	_, meta := enricher.Enrich(context.Background(), makeReq("test query"))
+	if !meta.CacheHit {
+		t.Fatal("expected cache hit before profile update")
+	}
+
+	// Update profile, which should invalidate cache.
+	profileMgr.SetField("communication.tone", "casual")
+
+	// Verify cache miss after invalidation.
+	_, meta = enricher.Enrich(context.Background(), makeReq("test query"))
+	if meta.CacheHit {
+		t.Error("expected cache miss after profile update")
 	}
 }

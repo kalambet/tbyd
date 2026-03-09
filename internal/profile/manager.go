@@ -34,9 +34,11 @@ type Manager struct {
 	clock Clock
 	ttl   time.Duration
 
-	mu        sync.RWMutex
-	cached    *Profile
-	cachedAt  time.Time
+	mu             sync.RWMutex
+	cached         *Profile
+	cachedAt       time.Time
+	onInvalidate   func()
+	profileVersion int64 // monotonically increasing; bumped on each SetField
 }
 
 // NewManager creates a Manager with a 60-second cache TTL.
@@ -89,6 +91,18 @@ func (m *Manager) GetProfile() (Profile, error) {
 	return deepCopyProfile(&p), nil
 }
 
+// OnInvalidate registers a callback that fires whenever the profile cache is
+// invalidated (e.g., on SetField). Used to cascade invalidation to the query cache.
+// Only one callback is supported; panics if called twice to prevent silent drops.
+func (m *Manager) OnInvalidate(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.onInvalidate != nil {
+		panic("profile.Manager.OnInvalidate: callback already registered; only one is supported")
+	}
+	m.onInvalidate = fn
+}
+
 // SetField persists a profile key and invalidates the cache.
 func (m *Manager) SetField(key string, value interface{}) error {
 	var str string
@@ -111,7 +125,21 @@ func (m *Manager) SetField(key string, value interface{}) error {
 	}
 
 	m.cached = nil
+	m.profileVersion++
+
+	if m.onInvalidate != nil {
+		m.onInvalidate()
+	}
 	return nil
+}
+
+// ProfileVersion returns the current profile version. It is a monotonically
+// increasing counter bumped on each SetField call. Used by the enrichment
+// pipeline to detect stale cache entries produced with an outdated profile.
+func (m *Manager) ProfileVersion() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.profileVersion
 }
 
 // GetSummary returns a compact string representation of the profile suitable

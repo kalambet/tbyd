@@ -96,6 +96,26 @@ var specs = []keySpec{
 		apply:   func(cfg *Config, v any) { cfg.Enrichment.RerankingThreshold = v.(float64) },
 		extract: func(cfg Config) any { return cfg.Enrichment.RerankingThreshold },
 	},
+	{
+		key: "enrichment.cache_enabled", typ: kBool, env: "TBYD_ENRICHMENT_CACHE_ENABLED",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.CacheEnabled = v.(bool) },
+		extract: func(cfg Config) any { return cfg.Enrichment.CacheEnabled },
+	},
+	{
+		key: "enrichment.cache_semantic_threshold", typ: kFloat, env: "TBYD_ENRICHMENT_CACHE_SEMANTIC_THRESHOLD",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.CacheSemanticThreshold = v.(float64) },
+		extract: func(cfg Config) any { return cfg.Enrichment.CacheSemanticThreshold },
+	},
+	{
+		key: "enrichment.cache_exact_ttl", typ: kString, env: "TBYD_ENRICHMENT_CACHE_EXACT_TTL",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.CacheExactTTL = v.(string) },
+		extract: func(cfg Config) any { return cfg.Enrichment.CacheExactTTL },
+	},
+	{
+		key: "enrichment.cache_semantic_ttl", typ: kString, env: "TBYD_ENRICHMENT_CACHE_SEMANTIC_TTL",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.CacheSemanticTTL = v.(string) },
+		extract: func(cfg Config) any { return cfg.Enrichment.CacheSemanticTTL },
+	},
 }
 
 func applyBackend(cfg *Config, b ConfigBackend) error {
