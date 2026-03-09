@@ -143,8 +143,8 @@ func TestExtract_SearchStrategy(t *testing.T) {
 	if got.SearchStrategy != "hybrid" {
 		t.Errorf("SearchStrategy = %q, want %q", got.SearchStrategy, "hybrid")
 	}
-	if got.HybridRatio != 0.6 {
-		t.Errorf("HybridRatio = %f, want 0.6", got.HybridRatio)
+	if got.HybridRatio == nil || *got.HybridRatio != 0.6 {
+		t.Errorf("HybridRatio = %v, want 0.6", got.HybridRatio)
 	}
 	if got.SuggestedTopK != 10 {
 		t.Errorf("SuggestedTopK = %d, want 10", got.SuggestedTopK)
@@ -162,8 +162,8 @@ func TestExtract_DefaultStrategy(t *testing.T) {
 	if got.SearchStrategy != "" {
 		t.Errorf("SearchStrategy = %q, want empty (default)", got.SearchStrategy)
 	}
-	if got.HybridRatio != 0 {
-		t.Errorf("HybridRatio = %f, want 0 (default)", got.HybridRatio)
+	if got.HybridRatio != nil {
+		t.Errorf("HybridRatio = %v, want nil (default)", got.HybridRatio)
 	}
 	if got.SuggestedTopK != 0 {
 		t.Errorf("SuggestedTopK = %d, want 0 (default)", got.SuggestedTopK)

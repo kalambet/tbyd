@@ -99,12 +99,13 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, extract
 	if strategy == "" {
 		strategy = "hybrid"
 	}
-	hybridRatio := extracted.HybridRatio
-	if hybridRatio == 0 && strategy != "keyword_heavy" {
-		hybridRatio = defaultHybridRatio
-	}
-	if strategy == "keyword_heavy" && hybridRatio == 0 {
+	var hybridRatio float64
+	if extracted.HybridRatio != nil {
+		hybridRatio = *extracted.HybridRatio
+	} else if strategy == "keyword_heavy" {
 		hybridRatio = 0.3 // keyword-heavy: 30% vector, 70% keyword
+	} else {
+		hybridRatio = defaultHybridRatio
 	}
 
 	// For vector_only strategy, use the original multi-embedding approach.
@@ -137,13 +138,13 @@ func (r *Retriever) retrieveVectorOnly(ctx context.Context, query string, extrac
 		g.Go(func() error {
 			vec, err := r.embedder.Embed(gCtx, text)
 			if err != nil {
-				slog.Warn("retrieval embed failed, skipping", "text", text, "error", err)
+				slog.Warn("retrieval embed failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 
 			results, err := r.store.Search(expectedTable, vec, perSearchK, filter)
 			if err != nil {
-				slog.Warn("retrieval search failed, skipping", "text", text, "error", err)
+				slog.Warn("retrieval search failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 
@@ -183,13 +184,13 @@ func (r *Retriever) retrieveHybrid(ctx context.Context, query string, extracted 
 		g.Go(func() error {
 			vec, err := r.embedder.Embed(gCtx, text)
 			if err != nil {
-				slog.Warn("hybrid retrieval embed failed, skipping", "text", text, "error", err)
+				slog.Warn("hybrid retrieval embed failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 
 			results, err := r.store.SearchHybrid(expectedTable, vec, text, perSearchK, vectorWeight, filter)
 			if err != nil {
-				slog.Warn("hybrid retrieval search failed, skipping", "text", text, "error", err)
+				slog.Warn("hybrid retrieval search failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 

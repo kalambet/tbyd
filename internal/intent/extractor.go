@@ -24,7 +24,7 @@ type Intent struct {
 	ContextNeeds   []string `json:"context_needs"`
 	IsPrivate      bool     `json:"is_private"`
 	SearchStrategy string   `json:"search_strategy"`  // "vector_only", "hybrid", "keyword_heavy"; empty treated as "hybrid"
-	HybridRatio    float64  `json:"hybrid_ratio"`      // 0.0 = all keyword, 1.0 = all vector; default 0.7
+	HybridRatio    *float64 `json:"hybrid_ratio,omitempty"` // nil = use default; 0.0 = all keyword, 1.0 = all vector
 	SuggestedTopK  int      `json:"suggested_top_k"`   // 0 = use default
 }
 

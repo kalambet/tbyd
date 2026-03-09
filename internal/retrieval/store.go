@@ -277,45 +277,7 @@ func (s *SQLiteStore) GetByIDs(ctx context.Context, table string, ids []string) 
 	if err := validateTable(table); err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	queryArgs := make([]interface{}, len(ids))
-	for i, id := range ids {
-		queryArgs[i] = id
-	}
-
-	query := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
-		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
-
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("querying by IDs: %w", err)
-	}
-	defer rows.Close()
-
-	var records []Record
-	for rows.Next() {
-		var r Record
-		var blob []byte
-		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
-			return nil, fmt.Errorf("scanning row: %w", err)
-		}
-		embedding, err := decodeFloat32s(blob)
-		if err != nil {
-			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
-		}
-		r.Embedding = embedding
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at for id %s: %w", r.ID, err)
-		}
-		r.CreatedAt = t
-		records = append(records, r)
-	}
-	return records, rows.Err()
+	return s.fetchRecordsByIDs(ctx, ids)
 }
 
 // encodeFloat32s serializes a float32 slice to little-endian bytes.
@@ -466,7 +428,7 @@ func (s *SQLiteStore) SearchKeyword(table string, query string, topK int, filter
 		docIDs[i] = h.docID
 	}
 
-	records, err := s.fetchRecordsByIDs(docIDs)
+	records, err := s.fetchRecordsByIDs(context.Background(), docIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +546,7 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 }
 
 // fetchRecordsByIDs fetches full records from context_vectors by their IDs.
-func (s *SQLiteStore) fetchRecordsByIDs(ids []string) ([]Record, error) {
+func (s *SQLiteStore) fetchRecordsByIDs(ctx context.Context, ids []string) ([]Record, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -596,7 +558,7 @@ func (s *SQLiteStore) fetchRecordsByIDs(ids []string) ([]Record, error) {
 	q := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
 		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
 
-	rows, err := s.db.Query(q, queryArgs...)
+	rows, err := s.db.QueryContext(ctx, q, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("fetching records by IDs: %w", err)
 	}
