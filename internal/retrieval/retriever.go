@@ -76,9 +76,14 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, extract
 		return nil
 	}
 
-	// Use intent's suggested topK if non-zero.
+	// Use intent's suggested topK if non-zero, capped at 100 to prevent
+	// excessive memory usage from prompt injection or runaway values.
+	const maxTopK = 100
 	if extracted.SuggestedTopK > 0 {
 		topK = extracted.SuggestedTopK
+		if topK > maxTopK {
+			topK = maxTopK
+		}
 	}
 
 	// Build a best-effort filter from intent topics.
@@ -162,9 +167,6 @@ func (r *Retriever) retrieveVectorOnly(ctx context.Context, query string, extrac
 func (r *Retriever) retrieveHybrid(ctx context.Context, query string, extracted intent.Intent, topK int, vectorWeight float32, filter string) []ContextChunk {
 	// Retrieve more candidates for merging/deduplication.
 	perSearchK := topK * 4
-	if len(extracted.Entities) > 0 {
-		perSearchK = topK * 4
-	}
 
 	// Build search texts: original query + entities.
 	textsToSearch := make([]string, 0, 1+len(extracted.Entities))

@@ -49,10 +49,11 @@ type VectorStore interface {
 	// Scores are normalized to the 0–1 range using min-max normalization.
 	SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error)
 
-	// SearchHybrid combines vector similarity search and BM25 keyword search,
-	// fusing their scores using either Reciprocal Rank Fusion (RRF) or weighted
-	// blending. vectorWeight controls the blend ratio (0.0 = all keyword,
-	// 1.0 = all vector). Results are deduplicated by record ID.
+	// SearchHybrid combines vector similarity search and BM25 keyword search
+	// using weighted Reciprocal Rank Fusion (RRF). vectorWeight scales the
+	// vector RRF contribution (0.0 = all keyword, 1.0 = all vector); keyword
+	// contributions are scaled by (1 - vectorWeight). Results are deduplicated
+	// by record ID.
 	SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error)
 }
 

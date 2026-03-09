@@ -481,7 +481,9 @@ func (s *SQLiteStore) SearchKeyword(table string, query string, topK int, filter
 }
 
 // SearchHybrid combines vector similarity and BM25 keyword search using
-// Reciprocal Rank Fusion (RRF). Results are deduplicated by record ID.
+// weighted Reciprocal Rank Fusion (RRF). vectorWeight controls the blend:
+// vector RRF scores are scaled by vectorWeight, keyword scores by (1-vectorWeight).
+// Results are deduplicated by record ID.
 func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error) {
 	if err := validateTable(table); err != nil {
 		return nil, err
@@ -493,6 +495,14 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 	// If no keyword query, fall back to vector-only search.
 	if query == "" {
 		return s.Search(table, vector, topK, filter)
+	}
+
+	// Clamp vectorWeight to [0, 1].
+	if vectorWeight < 0 {
+		vectorWeight = 0
+	}
+	if vectorWeight > 1 {
+		vectorWeight = 1
 	}
 
 	// Retrieve more candidates than needed for fusion.
@@ -526,8 +536,12 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 	vectorResults := vecResult.records
 	keywordResults := kwResult.records
 
-	// Reciprocal Rank Fusion with k=60.
+	// Weighted Reciprocal Rank Fusion with k=60.
+	// Vector contributions are scaled by vectorWeight, keyword by (1-vectorWeight).
 	const rrfK = 60
+	keywordWeight := float64(1 - vectorWeight)
+	vecW := float64(vectorWeight)
+
 	type fusedEntry struct {
 		record ScoredRecord
 		score  float64
@@ -536,7 +550,7 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 
 	for rank, sr := range vectorResults {
 		id := sr.ID
-		rrfScore := 1.0 / float64(rrfK+rank+1) // rank is 0-based, +1 to make 1-based
+		rrfScore := vecW / float64(rrfK+rank+1) // rank is 0-based, +1 to make 1-based
 		if entry, ok := fused[id]; ok {
 			entry.score += rrfScore
 		} else {
@@ -546,7 +560,7 @@ func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string,
 
 	for rank, sr := range keywordResults {
 		id := sr.ID
-		rrfScore := 1.0 / float64(rrfK+rank+1)
+		rrfScore := keywordWeight / float64(rrfK+rank+1)
 		if entry, ok := fused[id]; ok {
 			entry.score += rrfScore
 		} else {

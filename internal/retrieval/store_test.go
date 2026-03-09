@@ -446,6 +446,78 @@ func TestSearchHybrid_DeduplicatesResults(t *testing.T) {
 	}
 }
 
+func TestSearchHybrid_VectorWeightAffectsOrdering(t *testing.T) {
+	db := openTestDBWithFTS(t)
+	s := NewSQLiteStore(db)
+
+	// Build a corpus where changing vectorWeight reverses the top result.
+	// - "keyword-doc" matches the keyword query but has a distant vector.
+	// - "vector-doc" matches the vector query closely but doesn't match keyword.
+	// - 20 filler docs push keyword-doc far down in vector rankings so the
+	//   RRF gap between vector-doc (rank 0) and keyword-doc (rank 20+) is large.
+	records := []Record{
+		{
+			ID:         "keyword-doc",
+			SourceID:   "src-kw",
+			SourceType: "doc",
+			TextChunk:  "Kubernetes deployment strategies guide",
+			Embedding:  makeTestVector(768, 0.9), // far from query vector (0.1)
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+		{
+			ID:         "vector-doc",
+			SourceID:   "src-vec",
+			SourceType: "doc",
+			TextChunk:  "container orchestration systems overview",
+			Embedding:  makeTestVector(768, 0.1), // close to query vector
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+	}
+	// Filler docs with moderate vector similarity, no keyword match.
+	for i := 0; i < 20; i++ {
+		records = append(records, Record{
+			ID:         fmt.Sprintf("filler-%d", i),
+			SourceID:   fmt.Sprintf("src-filler-%d", i),
+			SourceType: "doc",
+			TextChunk:  fmt.Sprintf("unrelated document number %d about cloud computing", i),
+			Embedding:  makeTestVector(768, 0.15+float32(i)*0.02),
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		})
+	}
+	if err := s.Insert("context_vectors", records); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	queryVec := makeTestVector(768, 0.1)
+
+	// With high vectorWeight (0.9), vector-doc should rank first.
+	highVec, err := s.SearchHybrid("context_vectors", queryVec, "Kubernetes", 5, 0.9, "")
+	if err != nil {
+		t.Fatalf("SearchHybrid(vectorWeight=0.9): %v", err)
+	}
+	if len(highVec) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(highVec))
+	}
+	if highVec[0].ID != "vector-doc" {
+		t.Errorf("vectorWeight=0.9: first result = %q, want %q", highVec[0].ID, "vector-doc")
+	}
+
+	// With low vectorWeight (0.1), keyword-doc should rank first.
+	lowVec, err := s.SearchHybrid("context_vectors", queryVec, "Kubernetes", 5, 0.1, "")
+	if err != nil {
+		t.Fatalf("SearchHybrid(vectorWeight=0.1): %v", err)
+	}
+	if len(lowVec) < 2 {
+		t.Fatalf("expected at least 2 results, got %d", len(lowVec))
+	}
+	if lowVec[0].ID != "keyword-doc" {
+		t.Errorf("vectorWeight=0.1: first result = %q, want %q", lowVec[0].ID, "keyword-doc")
+	}
+}
+
 func TestSearchHybrid_VectorOnlyFallback(t *testing.T) {
 	db := openTestDBWithFTS(t)
 	s := NewSQLiteStore(db)
