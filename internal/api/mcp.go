@@ -169,7 +169,7 @@ func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {
 			return mcpError(fmt.Sprintf("failed to save: %v", err)), nil
 		}
 
-		if err := enqueueEnrichment(deps.Store, docID); err != nil {
+		if err := enqueueEnrichment(ctx, deps.Store, docID); err != nil {
 			return mcpError(fmt.Sprintf("saved doc but failed to queue enrichment: %v", err)), nil
 		}
 
@@ -304,7 +304,7 @@ func mcpSummarizeSession(deps MCPDeps) server.ToolHandlerFunc {
 			return mcpError(fmt.Sprintf("summary generated but failed to save: %v", err)), nil
 		}
 
-		if err := enqueueEnrichment(deps.Store, docID); err != nil {
+		if err := enqueueEnrichment(ctx, deps.Store, docID); err != nil {
 			return mcpError(fmt.Sprintf("summary saved but failed to queue enrichment: %v", err)), nil
 		}
 
@@ -376,7 +376,7 @@ func mcpResourceRecent(deps MCPDeps) server.ResourceHandlerFunc {
 	}
 }
 
-func enqueueEnrichment(store *storage.Store, docID string) error {
+func enqueueEnrichment(ctx context.Context, store *storage.Store, docID string) error {
 	payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
 	if err != nil {
 		return fmt.Errorf("failed to marshal enrichment payload: %w", err)
@@ -386,7 +386,7 @@ func enqueueEnrichment(store *storage.Store, docID string) error {
 		Type:        "ingest_enrich",
 		PayloadJSON: string(payload),
 	}
-	return store.EnqueueJob(job)
+	return store.EnqueueJob(ctx, job)
 }
 
 func mcpText(text string) *mcp.CallToolResult {

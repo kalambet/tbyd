@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -23,7 +24,7 @@ func mockUpstream(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *pr
 
 func TestHealth(t *testing.T) {
 	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -33,10 +34,13 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	var body map[string]string
+	var body map[string]any
 	json.NewDecoder(rr.Body).Decode(&body)
 	if body["status"] != "ok" {
 		t.Errorf("body = %v, want status=ok", body)
+	}
+	if dropped, ok := body["dropped_interactions"].(float64); !ok || dropped != 0 {
+		t.Errorf("dropped_interactions = %v, want 0", body["dropped_interactions"])
 	}
 }
 
@@ -47,7 +51,7 @@ func TestChatCompletions_Streaming(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, sseData)
 	})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}`
 	rr := httptest.NewRecorder()
@@ -76,7 +80,7 @@ func TestChatCompletions_NonStreaming(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, respJSON)
 	})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":false}`
 	rr := httptest.NewRecorder()
@@ -99,7 +103,7 @@ func TestChatCompletions_NonStreaming(t *testing.T) {
 
 func TestChatCompletions_InvalidBody(t *testing.T) {
 	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{invalid"))
@@ -112,7 +116,7 @@ func TestChatCompletions_InvalidBody(t *testing.T) {
 
 func TestChatCompletions_MissingMessages(t *testing.T) {
 	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test","messages":[]}`))
@@ -129,7 +133,7 @@ func TestChatCompletions_UpstreamError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"error":{"message":"internal failure","type":"server_error"}}`)
 	})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -168,7 +172,7 @@ func TestChatCompletions_StreamingMidStreamError(t *testing.T) {
 		conn, _, _ := hj.Hijack()
 		conn.Close()
 	})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}],"stream":true}`
 	rr := httptest.NewRecorder()
@@ -190,7 +194,7 @@ func TestChatCompletions_StreamingMidStreamError(t *testing.T) {
 
 func TestBindsToLoopback(t *testing.T) {
 	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
-	handler := NewOpenAIHandler(c, nil)
+	handler := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	srv := &http.Server{
 		Addr:    "127.0.0.1:0",
@@ -224,7 +228,7 @@ func TestModels(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(list)
 	})
-	h := NewOpenAIHandler(c, nil)
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

@@ -442,7 +442,7 @@ func TestMCPResource_Recent(t *testing.T) {
 	deps, store := newTestMCPDeps(t)
 
 	// Save an interaction.
-	err := store.SaveInteraction(storage.Interaction{
+	err := store.SaveInteraction(context.Background(), storage.Interaction{
 		ID:        "int-1",
 		CreatedAt: time.Now().UTC(),
 		UserQuery: "What is Go?",

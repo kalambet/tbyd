@@ -174,10 +174,11 @@ func (c *Client) PullModel(ctx context.Context, name string, onProgress func(Pul
 
 // chatRequest is the JSON body for POST /api/chat.
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
-	Format   any       `json:"format,omitempty"`
+	Model    string         `json:"model"`
+	Messages []Message      `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Format   any            `json:"format,omitempty"`
+	Options  map[string]any `json:"options,omitempty"`
 }
 
 // chatResponse is the JSON returned by POST /api/chat (non-streaming).
@@ -196,7 +197,25 @@ func (c *Client) Chat(ctx context.Context, model string, messages []Message, jso
 	if jsonSchema != nil {
 		cr.Format = jsonSchema
 	}
+	return c.doChatRequest(ctx, cr)
+}
 
+// ChatWithOptions is like Chat but accepts Ollama model options (e.g. temperature).
+func (c *Client) ChatWithOptions(ctx context.Context, model string, messages []Message, jsonSchema *Schema, opts map[string]any) (string, error) {
+	cr := chatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+		Options:  opts,
+	}
+	if jsonSchema != nil {
+		cr.Format = jsonSchema
+	}
+	return c.doChatRequest(ctx, cr)
+}
+
+// doChatRequest marshals, sends, and decodes a chat request.
+func (c *Client) doChatRequest(ctx context.Context, cr chatRequest) (string, error) {
 	body, err := json.Marshal(cr)
 	if err != nil {
 		return "", err

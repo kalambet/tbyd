@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -124,7 +125,7 @@ func TestSaveAndGetInteraction(t *testing.T) {
 		VectorIDs:      "[]",
 	}
 
-	if err := s.SaveInteraction(want); err != nil {
+	if err := s.SaveInteraction(context.Background(),want); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 
@@ -179,7 +180,7 @@ func TestUpdateFeedback(t *testing.T) {
 		UserQuery: "test query",
 		VectorIDs: "[]",
 	}
-	if err := s.SaveInteraction(i); err != nil {
+	if err := s.SaveInteraction(context.Background(),i); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 
@@ -211,7 +212,7 @@ func TestGetRecentInteractions(t *testing.T) {
 			UserQuery: fmt.Sprintf("query %d", j),
 			VectorIDs: "[]",
 		}
-		if err := s.SaveInteraction(i); err != nil {
+		if err := s.SaveInteraction(context.Background(),i); err != nil {
 			t.Fatalf("SaveInteraction %d: %v", j, err)
 		}
 	}
@@ -250,7 +251,7 @@ func TestSaveAndGetInteraction_Status(t *testing.T) {
 		VectorIDs: "[]",
 	}
 
-	if err := s.SaveInteraction(want); err != nil {
+	if err := s.SaveInteraction(context.Background(),want); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 
@@ -275,7 +276,7 @@ func TestSaveInteraction_DefaultStatus(t *testing.T) {
 		VectorIDs: "[]",
 	}
 
-	if err := s.SaveInteraction(want); err != nil {
+	if err := s.SaveInteraction(context.Background(),want); err != nil {
 		t.Fatalf("SaveInteraction: %v", err)
 	}
 
@@ -429,7 +430,7 @@ func TestEnqueueAndClaimJob(t *testing.T) {
 		Type:        "enrichment",
 		PayloadJSON: `{"doc":"d1"}`,
 	}
-	if err := s.EnqueueJob(job); err != nil {
+	if err := s.EnqueueJob(context.Background(),job); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 
@@ -478,7 +479,7 @@ func TestClaimNextJob_RespectRunAfter(t *testing.T) {
 		PayloadJSON: `{}`,
 		RunAfter:    time.Now().UTC().Add(1 * time.Hour),
 	}
-	if err := s.EnqueueJob(job); err != nil {
+	if err := s.EnqueueJob(context.Background(),job); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 
@@ -494,10 +495,10 @@ func TestClaimNextJob_RespectRunAfter(t *testing.T) {
 func TestClaimNextJob_TypeFilter(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-a", Type: "a", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-a", Type: "a", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob a: %v", err)
 	}
-	if err := s.EnqueueJob(Job{ID: "j-b", Type: "b", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-b", Type: "b", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob b: %v", err)
 	}
 
@@ -516,14 +517,14 @@ func TestClaimNextJob_TypeFilter(t *testing.T) {
 func TestClaimNextJob_SkipsRunning(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-first", Type: "x", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-first", Type: "x", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob first: %v", err)
 	}
 	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
 		t.Fatalf("ClaimNextJob first: %v", err)
 	}
 
-	if err := s.EnqueueJob(Job{ID: "j-second", Type: "x", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-second", Type: "x", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob second: %v", err)
 	}
 
@@ -542,7 +543,7 @@ func TestClaimNextJob_SkipsRunning(t *testing.T) {
 func TestCompleteJob(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-complete", Type: "x", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-complete", Type: "x", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
@@ -564,7 +565,7 @@ func TestCompleteJob(t *testing.T) {
 func TestFailJob_IncrementsAttempts(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-fail-inc", Type: "x", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-fail-inc", Type: "x", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
@@ -593,7 +594,7 @@ func TestFailJob_IncrementsAttempts(t *testing.T) {
 func TestFailJob_MaxAttemptsReached(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-fail-max", Type: "x", PayloadJSON: `{}`, MaxAttempts: 1}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-fail-max", Type: "x", PayloadJSON: `{}`, MaxAttempts: 1}); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {
@@ -615,7 +616,7 @@ func TestFailJob_MaxAttemptsReached(t *testing.T) {
 func TestFailJob_SetsBackoff(t *testing.T) {
 	s := openTestStore(t)
 
-	if err := s.EnqueueJob(Job{ID: "j-backoff", Type: "x", PayloadJSON: `{}`}); err != nil {
+	if err := s.EnqueueJob(context.Background(),Job{ID: "j-backoff", Type: "x", PayloadJSON: `{}`}); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 	if _, err := s.ClaimNextJob([]string{"x"}); err != nil {

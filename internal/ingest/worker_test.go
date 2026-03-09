@@ -66,7 +66,7 @@ func enqueueTestJob(t *testing.T, store *storage.Store, docID, content string) {
 		Type:        "ingest_enrich",
 		PayloadJSON: string(payload),
 	}
-	if err := store.EnqueueJob(job); err != nil {
+	if err := store.EnqueueJob(context.Background(),job); err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 }
@@ -267,7 +267,7 @@ func TestWorker_ConcurrentEnqueue(t *testing.T) {
 					Type:        "ingest_enrich",
 					PayloadJSON: string(payload),
 				}
-				if err := store.EnqueueJob(job); err != nil {
+				if err := store.EnqueueJob(context.Background(),job); err != nil {
 					t.Errorf("EnqueueJob %s: %v", docID, err)
 					return
 				}
@@ -317,5 +317,225 @@ func TestWorker_ConcurrentEnqueue(t *testing.T) {
 				t.Errorf("doc %s has empty VectorID", docID)
 			}
 		}
+	}
+}
+
+// --- interaction_summarize tests ---
+
+type mockSummarizer struct {
+	summarizeFn func(ctx context.Context, userQuery, cloudResponse string) (string, error)
+}
+
+func (m *mockSummarizer) Summarize(ctx context.Context, userQuery, cloudResponse string) (string, error) {
+	return m.summarizeFn(ctx, userQuery, cloudResponse)
+}
+
+func enqueueSummarizeJob(t *testing.T, store *storage.Store, interactionID, userQuery, cloudResponse string) {
+	t.Helper()
+	interaction := storage.Interaction{
+		ID:            interactionID,
+		CreatedAt:     time.Now().UTC(),
+		UserQuery:     userQuery,
+		CloudModel:    "test-model",
+		CloudResponse: cloudResponse,
+		Status:        "completed",
+		VectorIDs:     "[]",
+	}
+	if err := store.SaveInteraction(context.Background(),interaction); err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]string{"interaction_id": interactionID})
+	job := storage.Job{
+		ID:          "job-" + interactionID,
+		Type:        "interaction_summarize",
+		PayloadJSON: string(payload),
+	}
+	if err := store.EnqueueJob(context.Background(),job); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+}
+
+func TestWorker_SummarizeJob(t *testing.T) {
+	store := openTestStore(t)
+	cloudResp := `{"id":"gen-1","choices":[{"message":{"role":"assistant","content":"Go is great for backends."}}]}`
+	enqueueSummarizeJob(t, store, "ix-1", "What language for backends?", cloudResp)
+
+	inserter := &mockVectorInserter{}
+	w := NewWorker(store, &mockEmbedder{
+		embedFn: func(_ context.Context, text string) ([]float32, error) {
+			return []float32{0.4, 0.5, 0.6}, nil
+		},
+	}, inserter, 0)
+
+	w.SetSummarizer(&mockSummarizer{
+		summarizeFn: func(_ context.Context, query, resp string) (string, error) {
+			if query != "What language for backends?" {
+				t.Errorf("summarizer got query = %q", query)
+			}
+			if resp != "Go is great for backends." {
+				t.Errorf("summarizer got response = %q", resp)
+			}
+			return "[2026-03-09] User asked about backend languages. Response: Go recommended.", nil
+		},
+	})
+
+	ctx := context.Background()
+	didWork, err := w.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if !didWork {
+		t.Fatal("RunOnce returned false, expected true")
+	}
+
+	// Verify vector was inserted with source_type="interaction".
+	inserter.mu.Lock()
+	defer inserter.mu.Unlock()
+	if len(inserter.inserted) != 1 {
+		t.Fatalf("inserted %d records, want 1", len(inserter.inserted))
+	}
+	rec := inserter.inserted[0]
+	if rec.SourceID != "ix-1" {
+		t.Errorf("SourceID = %q, want %q", rec.SourceID, "ix-1")
+	}
+	if rec.SourceType != "interaction" {
+		t.Errorf("SourceType = %q, want %q", rec.SourceType, "interaction")
+	}
+	if rec.TextChunk == "" {
+		t.Error("TextChunk is empty")
+	}
+
+	// Verify interaction vector_ids were updated.
+	ix, err := store.GetInteraction("ix-1")
+	if err != nil {
+		t.Fatalf("GetInteraction: %v", err)
+	}
+	var vectorIDs []string
+	if err := json.Unmarshal([]byte(ix.VectorIDs), &vectorIDs); err != nil {
+		t.Fatalf("parsing vector_ids: %v", err)
+	}
+	if len(vectorIDs) != 1 {
+		t.Errorf("vector_ids has %d entries, want 1", len(vectorIDs))
+	}
+	if len(vectorIDs) > 0 && vectorIDs[0] != rec.ID {
+		t.Errorf("vector_ids[0] = %q, want %q", vectorIDs[0], rec.ID)
+	}
+}
+
+func TestWorker_SummarizeJob_NoSummarizer(t *testing.T) {
+	store := openTestStore(t)
+	enqueueSummarizeJob(t, store, "ix-2", "hello", `{"choices":[{"message":{"content":"hi"}}]}`)
+
+	inserter := &mockVectorInserter{}
+	w := NewWorker(store, &mockEmbedder{
+		embedFn: func(_ context.Context, _ string) ([]float32, error) {
+			return []float32{0.1}, nil
+		},
+	}, inserter, 0)
+	// No summarizer set.
+
+	ctx := context.Background()
+	didWork, err := w.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce error: %v", err)
+	}
+	if !didWork {
+		t.Fatal("RunOnce returned false")
+	}
+
+	// Job should be pending (failed and queued for retry) rather than
+	// silently completed, so it can be reprocessed once a summarizer is
+	// configured.
+	var status string
+	if err := store.DB().QueryRow(`SELECT status FROM jobs WHERE id = 'job-ix-2'`).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want pending (retry when summarizer available)", status)
+	}
+}
+
+func TestWorker_SummarizeJob_RetryOnFailure(t *testing.T) {
+	store := openTestStore(t)
+	enqueueSummarizeJob(t, store, "ix-3", "hello", `{"choices":[{"message":{"content":"world"}}]}`)
+
+	var calls atomic.Int32
+	inserter := &mockVectorInserter{}
+	w := NewWorker(store, &mockEmbedder{
+		embedFn: func(_ context.Context, _ string) ([]float32, error) {
+			return []float32{0.1, 0.2}, nil
+		},
+	}, inserter, 0)
+
+	w.SetSummarizer(&mockSummarizer{
+		summarizeFn: func(_ context.Context, _, _ string) (string, error) {
+			n := calls.Add(1)
+			if n == 1 {
+				return "", fmt.Errorf("model timeout")
+			}
+			return "summary text", nil
+		},
+	})
+
+	ctx := context.Background()
+
+	// 1st attempt — fails.
+	didWork, err := w.RunOnce(ctx)
+	if err != nil || !didWork {
+		t.Fatalf("RunOnce 1: didWork=%v, err=%v", didWork, err)
+	}
+
+	resetRunAfter(t, store, "job-ix-3")
+
+	// 2nd attempt — succeeds.
+	didWork, err = w.RunOnce(ctx)
+	if err != nil || !didWork {
+		t.Fatalf("RunOnce 2: didWork=%v, err=%v", didWork, err)
+	}
+
+	var status string
+	if err := store.DB().QueryRow(`SELECT status FROM jobs WHERE id = 'job-ix-3'`).Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "completed" {
+		t.Errorf("status = %q, want completed", status)
+	}
+}
+
+func TestExtractAssistantContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "valid openai response",
+			input: `{"id":"gen-1","choices":[{"message":{"role":"assistant","content":"Hello world"}}]}`,
+			want:  "Hello world",
+		},
+		{
+			name:  "empty choices",
+			input: `{"id":"gen-1","choices":[]}`,
+			want:  `{"id":"gen-1","choices":[]}`,
+		},
+		{
+			name:  "invalid json",
+			input: `not json`,
+			want:  `not json`,
+		},
+		{
+			name:  "streaming sse data",
+			input: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+			want:  "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractAssistantContent(tt.input)
+			if got != tt.want {
+				t.Errorf("extractAssistantContent() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

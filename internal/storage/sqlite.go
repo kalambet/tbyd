@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -175,12 +176,12 @@ func (s *Store) AppliedMigrations() ([]int, error) {
 
 // --- Interactions ---
 
-func (s *Store) SaveInteraction(i Interaction) error {
+func (s *Store) SaveInteraction(ctx context.Context, i Interaction) error {
 	status := i.Status
 	if status == "" {
 		status = "completed"
 	}
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO interactions (id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.ID, i.CreatedAt.UTC().Format(time.RFC3339), i.UserQuery, i.EnrichedPrompt,
@@ -352,7 +353,7 @@ func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 
 // --- Jobs ---
 
-func (s *Store) EnqueueJob(job Job) error {
+func (s *Store) EnqueueJob(ctx context.Context, job Job) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	runAfter := now
 	if !job.RunAfter.IsZero() {
@@ -362,7 +363,7 @@ func (s *Store) EnqueueJob(job Job) error {
 	if maxAttempts == 0 {
 		maxAttempts = 3
 	}
-	_, err := s.db.Exec(`
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO jobs (id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at)
 		VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)`,
 		job.ID, job.Type, job.PayloadJSON, maxAttempts, runAfter, now, now,
@@ -579,6 +580,21 @@ func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error
 		results = append(results, d)
 	}
 	return results, rows.Err()
+}
+
+func (s *Store) UpdateInteractionVectorIDs(id, vectorIDsJSON string) error {
+	res, err := s.db.Exec(`UPDATE interactions SET vector_ids = ? WHERE id = ?`, vectorIDsJSON, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) UpdateContextDocVectorID(id, vectorID string) error {
