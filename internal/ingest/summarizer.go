@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ChatOptions holds optional parameters for chat calls (e.g. temperature).
@@ -47,10 +48,9 @@ func (s *LLMSummarizer) Summarize(ctx context.Context, userQuery, assistantRespo
 	defer cancel()
 
 	// Truncate long responses to avoid blowing context budget.
-	truncatedResponse := assistantResponse
-	if len(truncatedResponse) > 500 {
-		truncatedResponse = truncatedResponse[:500]
-	}
+	// Use 2000 runes (~500-800 tokens) to capture enough context for
+	// meaningful summarization while staying within local model limits.
+	truncatedResponse := truncateRuneSafe(assistantResponse, 2000)
 
 	today := time.Now().Format("2006-01-02")
 	messages := []ChatMessage{
@@ -72,4 +72,14 @@ func (s *LLMSummarizer) Summarize(ctx context.Context, userQuery, assistantRespo
 	}
 
 	return result, nil
+}
+
+// truncateRuneSafe truncates s to at most maxRunes runes, ensuring the result
+// is always valid UTF-8 (never splits a multi-byte character).
+func truncateRuneSafe(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes])
 }

@@ -20,6 +20,7 @@ type mockInteractionSaver struct {
 	interactions []storage.Interaction
 	jobs         []storage.Job
 	saveFn       func(storage.Interaction) error
+	saveDone     chan struct{} // signalled after each successful save
 }
 
 func (m *mockInteractionSaver) SaveInteraction(i storage.Interaction) error {
@@ -29,6 +30,9 @@ func (m *mockInteractionSaver) SaveInteraction(i storage.Interaction) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.interactions = append(m.interactions, i)
+	if m.saveDone != nil {
+		m.saveDone <- struct{}{}
+	}
 	return nil
 }
 
@@ -63,8 +67,11 @@ func TestSaveInteraction_OptInEnabled(t *testing.T) {
 		fmt.Fprint(w, respJSON)
 	})
 
-	saver := &mockInteractionSaver{}
-	h := NewOpenAIHandler(context.Background(), c, nil, saver, true, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi there"}]}`
 	rr := httptest.NewRecorder()
@@ -75,8 +82,12 @@ func TestSaveInteraction_OptInEnabled(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	// Wait briefly for the async goroutine to complete.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the async save goroutine to complete.
+	select {
+	case <-saver.saveDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for interaction save")
+	}
 
 	interactions := saver.getInteractions()
 	if len(interactions) != 1 {
@@ -126,7 +137,7 @@ func TestSaveInteraction_OptInDisabled(t *testing.T) {
 		fmt.Fprint(w, respJSON)
 	})
 
-	saver := &mockInteractionSaver{}
+	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
 	h := NewOpenAIHandler(context.Background(), c, nil, saver, false, false) // disabled
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
@@ -138,7 +149,13 @@ func TestSaveInteraction_OptInDisabled(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Confirm no save occurred — brief wait is acceptable for negative assertion.
+	select {
+	case <-saver.saveDone:
+		t.Fatal("interaction was saved despite being disabled")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: no save.
+	}
 
 	interactions := saver.getInteractions()
 	if len(interactions) != 0 {
@@ -178,8 +195,11 @@ func TestSaveInteraction_Streaming(t *testing.T) {
 		fmt.Fprint(w, sseData)
 	})
 
-	saver := &mockInteractionSaver{}
-	h := NewOpenAIHandler(context.Background(), c, nil, saver, true, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"stream me"}],"stream":true}`
 	rr := httptest.NewRecorder()
@@ -190,7 +210,12 @@ func TestSaveInteraction_Streaming(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the async save goroutine to complete.
+	select {
+	case <-saver.saveDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for interaction save")
+	}
 
 	interactions := saver.getInteractions()
 	if len(interactions) != 1 {
@@ -229,12 +254,15 @@ func TestSaveInteraction_ErrorDoesNotBlockResponse(t *testing.T) {
 		fmt.Fprint(w, respJSON)
 	})
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	saver := &mockInteractionSaver{
 		saveFn: func(_ storage.Interaction) error {
 			return fmt.Errorf("database error")
 		},
 	}
-	h := NewOpenAIHandler(context.Background(), c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -298,6 +326,9 @@ func TestSaveInteraction_QueuedImmediately(t *testing.T) {
 		fmt.Fprint(w, respJSON)
 	})
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	saver := &mockInteractionSaver{
 		saveFn: func(i storage.Interaction) error {
 			// Block until test signals.
@@ -305,7 +336,7 @@ func TestSaveInteraction_QueuedImmediately(t *testing.T) {
 			return nil
 		},
 	}
-	h := NewOpenAIHandler(context.Background(), c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()

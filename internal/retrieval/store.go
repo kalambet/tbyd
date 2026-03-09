@@ -32,8 +32,11 @@ func NewSQLiteStore(db *sql.DB) *SQLiteStore {
 	return &SQLiteStore{db: db}
 }
 
-// expectedTable is the only table name the SQLite backend supports.
-const expectedTable = "context_vectors"
+// VectorTable is the canonical vector table name used across the application.
+const VectorTable = "context_vectors"
+
+// expectedTable is kept for internal validation.
+const expectedTable = VectorTable
 
 func validateTable(table string) error {
 	if table != expectedTable {

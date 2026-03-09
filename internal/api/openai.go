@@ -127,7 +127,6 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 		userQuery := extractLastUserMessage(req.Messages)
 
 		// Enrich if enricher is available.
-		var enrichedPrompt string
 		if enricher != nil {
 			enriched, meta := enricher.Enrich(r.Context(), req)
 			req = enriched
@@ -136,10 +135,13 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 				"chunks_used", len(meta.ChunksUsed),
 				"duration_ms", meta.EnrichmentDurationMs,
 			)
-			// Capture enriched messages for interaction storage.
-			if b, err := json.Marshal(req.Messages); err == nil {
-				enrichedPrompt = string(b)
-			}
+		}
+
+		// Always capture the final forwarded messages for interaction storage,
+		// whether enriched or original (passthrough mode).
+		var enrichedPrompt string
+		if b, err := json.Marshal(req.Messages); err == nil {
+			enrichedPrompt = string(b)
 		}
 
 		rc, err := p.Chat(r.Context(), req)
@@ -150,8 +152,9 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 		defer rc.Close()
 
 		var responseBody string
+		var upstreamModel string
 		if req.Stream {
-			responseBody = streamResponseCapture(w, rc)
+			responseBody, upstreamModel = streamResponseCapture(w, rc)
 		} else {
 			body, err := io.ReadAll(rc)
 			if err != nil {
@@ -161,6 +164,19 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(body)
 			responseBody = string(body)
+			// Extract model from upstream response.
+			var respObj struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(body, &respObj) == nil && respObj.Model != "" {
+				upstreamModel = respObj.Model
+			}
+		}
+
+		// Prefer upstream model (what was actually used) over request model.
+		model := upstreamModel
+		if model == "" {
+			model = req.Model
 		}
 
 		// Enqueue interaction save via bounded channel (non-blocking).
@@ -168,7 +184,7 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 			rec := interactionRecord{
 				UserQuery:      userQuery,
 				EnrichedPrompt: enrichedPrompt,
-				Model:          req.Model,
+				Model:          model,
 				CloudResponse:  responseBody,
 			}
 			select {
@@ -263,12 +279,13 @@ func doSaveInteraction(saver InteractionSaver, rec interactionRecord, enqueueSum
 
 // streamResponseCapture streams SSE events to the client while reassembling
 // the assistant's content from streaming delta chunks. Returns the reassembled
-// content as a synthetic non-streaming response JSON for storage.
-func streamResponseCapture(w http.ResponseWriter, rc io.Reader) string {
+// content as a synthetic non-streaming response JSON for storage, and the
+// upstream model name extracted from SSE chunks.
+func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
-		return ""
+		return "", ""
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -333,7 +350,7 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) string {
 	// extractAssistantContent can parse it uniformly.
 	assembled := contentBuilder.String()
 	if assembled == "" {
-		return ""
+		return "", streamModel
 	}
 	synth, err := json.Marshal(map[string]any{
 		"model": streamModel,
@@ -347,9 +364,10 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) string {
 		},
 	})
 	if err != nil {
-		return ""
+		slog.Error("failed to marshal synthetic stream response", "error", err)
+		return "", streamModel
 	}
-	return string(synth)
+	return string(synth), streamModel
 }
 
 func hasMessages(raw json.RawMessage) bool {

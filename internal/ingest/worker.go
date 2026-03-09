@@ -157,7 +157,7 @@ func (w *Worker) processEnrichJob(ctx context.Context, job *storage.Job) error {
 		Tags:       doc.Tags,
 	}
 
-	if err := w.vectors.Insert("context_vectors", []retrieval.Record{rec}); err != nil {
+	if err := w.vectors.Insert(retrieval.VectorTable, []retrieval.Record{rec}); err != nil {
 		return fmt.Errorf("inserting vector: %w", err)
 	}
 
@@ -208,8 +208,14 @@ func (w *Worker) processSummarizeJob(ctx context.Context, job *storage.Job) erro
 		return fmt.Errorf("embedding summary: %w", err)
 	}
 
+	// Use a deterministic vector ID derived from the interaction ID so that
+	// retries are idempotent. If a previous attempt inserted the vector but
+	// failed to update interaction.vector_ids, the next attempt overwrites
+	// the same record instead of creating an orphan.
+	vectorID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("interaction:"+interaction.ID)).String()
+
 	rec := retrieval.Record{
-		ID:         uuid.New().String(),
+		ID:         vectorID,
 		SourceID:   interaction.ID,
 		SourceType: "interaction",
 		TextChunk:  summary,
@@ -218,15 +224,17 @@ func (w *Worker) processSummarizeJob(ctx context.Context, job *storage.Job) erro
 		Tags:       "[]",
 	}
 
-	if err := w.vectors.Insert("context_vectors", []retrieval.Record{rec}); err != nil {
+	if err := w.vectors.Insert(retrieval.VectorTable, []retrieval.Record{rec}); err != nil {
 		return fmt.Errorf("inserting vector: %w", err)
 	}
 
-	vectorIDsJSON, err := json.Marshal([]string{rec.ID})
+	vectorIDsJSON, err := json.Marshal([]string{vectorID})
 	if err != nil {
 		return fmt.Errorf("marshaling vector IDs: %w", err)
 	}
 
+	// Invariant: exactly one vector per interaction. This overwrites any
+	// previous value, which is safe because the vector ID is deterministic.
 	if err := w.store.UpdateInteractionVectorIDs(interaction.ID, string(vectorIDsJSON)); err != nil {
 		return fmt.Errorf("updating interaction vector_ids: %w", err)
 	}

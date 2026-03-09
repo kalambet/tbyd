@@ -912,10 +912,10 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.10** Query-level caching (exact + semantic)
 
 ### Phase 2 — User Surfaces
-- [ ] **2.1** Universal ingestion HTTP API
+- [x] **2.1** Universal ingestion HTTP API
 - [x] **2.2** MCP server (`add_context`, `recall`, `set_preference`, `summarize_session`)
-- [ ] **2.3** CLI interface (`tbyd ingest`, `tbyd status`, `tbyd profile`, `tbyd recall`)
-- [ ] **2.4** Interaction storage (opt-in)
+- [x] **2.3** CLI interface (`tbyd ingest`, `tbyd status`, `tbyd profile`, `tbyd recall`)
+- [x] **2.4** Interaction storage (opt-in)
 - [ ] **2.5** macOS SwiftUI menubar app
 - [ ] **2.6** macOS Share Extension (Mail, Finder, Safari, any app)
 
