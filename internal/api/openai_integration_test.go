@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,7 +52,7 @@ func TestPassthroughRoundTrip(t *testing.T) {
 
 	// Point our proxy client at the mock upstream.
 	c := proxy.NewClientWithBaseURL("test-key", upstream.URL)
-	handler := NewOpenAIHandler(c, nil)
+	handler := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
 
 	// Start the tbyd server.
 	srv := httptest.NewServer(handler)

@@ -199,9 +199,25 @@ func runServer() error {
 		return fmt.Errorf("getting API token: %w", err)
 	}
 
+	// Build ingest worker with optional interaction summarizer.
+	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
+	hasSummarizer := false
+	summarizeModel := cfg.Ollama.DeepModel
+	if summarizeModel == "" {
+		summarizeModel = cfg.Ollama.FastModel
+	}
+	if summarizeModel != "" {
+		summarizer := ingest.NewLLMSummarizer(&engineChatAdapter{eng: eng}, summarizeModel)
+		worker.SetSummarizer(summarizer)
+		hasSummarizer = true
+	} else {
+		slog.Warn("no model configured for interaction summarization; summaries will be skipped")
+	}
+	go worker.Run(ctx)
+
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	openaiHandler := api.NewOpenAIHandler(proxyClient, enricher)
+	openaiHandler := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, hasSummarizer)
 	appHandler := api.NewAppHandler(api.AppDeps{
 		Store:      store,
 		Profile:    profileMgr,
@@ -221,10 +237,6 @@ func runServer() error {
 		Addr:    addr,
 		Handler: topRouter,
 	}
-
-	// Start ingest worker.
-	worker := ingest.NewWorker(store, embedder, vectorStore, 500*time.Millisecond)
-	go worker.Run(ctx)
 
 	// Build and start MCP server (stdio transport in a goroutine).
 	mcpEngine := &api.EngineAdapter{
@@ -385,4 +397,28 @@ func apiGet(client *http.Client, url, token string) (*http.Response, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return client.Do(req)
+}
+
+// engineChatAdapter wraps engine.Engine to satisfy ingest.ChatEngine.
+// When the underlying engine supports ChatOptioner, temperature and other
+// options are forwarded to the inference backend.
+type engineChatAdapter struct {
+	eng engine.Engine
+}
+
+func (a *engineChatAdapter) Chat(ctx context.Context, model string, messages []ingest.ChatMessage, opts *ingest.ChatOptions) (string, error) {
+	engineMsgs := make([]engine.Message, len(messages))
+	for i, m := range messages {
+		engineMsgs[i] = engine.Message{Role: m.Role, Content: m.Content}
+	}
+
+	// Use ChatWithOptions when the engine supports it and options are provided.
+	if opts != nil {
+		if co, ok := a.eng.(engine.ChatOptioner); ok {
+			engineOpts := engine.ChatOptions{Temperature: opts.Temperature}
+			return co.ChatWithOptions(ctx, model, engineMsgs, nil, engineOpts)
+		}
+	}
+
+	return a.eng.Chat(ctx, model, engineMsgs, nil)
 }

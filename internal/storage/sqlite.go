@@ -581,6 +581,21 @@ func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error
 	return results, rows.Err()
 }
 
+func (s *Store) UpdateInteractionVectorIDs(id, vectorIDsJSON string) error {
+	res, err := s.db.Exec(`UPDATE interactions SET vector_ids = ? WHERE id = ?`, vectorIDsJSON, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) UpdateContextDocVectorID(id, vectorID string) error {
 	res, err := s.db.Exec(`UPDATE context_docs SET vector_id = ? WHERE id = ?`, vectorID, id)
 	if err != nil {

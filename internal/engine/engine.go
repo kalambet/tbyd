@@ -25,3 +25,14 @@ type Engine interface {
 	// PullModel downloads a model. The optional callback receives progress updates.
 	PullModel(ctx context.Context, name string, onProgress func(PullProgress)) error
 }
+
+// ChatOptions holds optional parameters for chat calls (e.g. temperature).
+type ChatOptions struct {
+	Temperature *float64
+}
+
+// ChatOptioner is an optional interface for engines that support chat options.
+// Use a type assertion to check before calling.
+type ChatOptioner interface {
+	ChatWithOptions(ctx context.Context, model string, messages []Message, jsonSchema *Schema, opts ChatOptions) (string, error)
+}

@@ -61,6 +61,11 @@ var specs = []keySpec{
 		extract: func(cfg Config) any { return cfg.Storage.DataDir },
 	},
 	{
+		key: "storage.save_interactions", typ: kBool, env: "TBYD_STORAGE_SAVE_INTERACTIONS",
+		apply:   func(cfg *Config, v any) { cfg.Storage.SaveInteractions = v.(bool) },
+		extract: func(cfg Config) any { return cfg.Storage.SaveInteractions },
+	},
+	{
 		key: "proxy.openrouter_api_key", typ: kString, env: "TBYD_OPENROUTER_API_KEY",
 		secret: true,
 		apply:   func(cfg *Config, v any) { cfg.Proxy.OpenRouterAPIKey = v.(string) },

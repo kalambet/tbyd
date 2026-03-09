@@ -39,6 +39,34 @@ func (e *OllamaEngine) Chat(ctx context.Context, model string, messages []Messag
 	return e.client.Chat(ctx, model, msgs, s)
 }
 
+func (e *OllamaEngine) ChatWithOptions(ctx context.Context, model string, messages []Message, jsonSchema *Schema, opts ChatOptions) (string, error) {
+	msgs := make([]ollama.Message, len(messages))
+	for i, m := range messages {
+		msgs[i] = ollama.Message{Role: m.Role, Content: m.Content}
+	}
+
+	var s *ollama.Schema
+	if jsonSchema != nil {
+		s = &ollama.Schema{
+			Type:     jsonSchema.Type,
+			Required: jsonSchema.Required,
+		}
+		if jsonSchema.Properties != nil {
+			s.Properties = make(map[string]ollama.SchemaProperty, len(jsonSchema.Properties))
+			for k, v := range jsonSchema.Properties {
+				s.Properties[k] = ollama.SchemaProperty{Type: v.Type, Description: v.Description}
+			}
+		}
+	}
+
+	ollamaOpts := make(map[string]any)
+	if opts.Temperature != nil {
+		ollamaOpts["temperature"] = *opts.Temperature
+	}
+
+	return e.client.ChatWithOptions(ctx, model, msgs, s, ollamaOpts)
+}
+
 func (e *OllamaEngine) Embed(ctx context.Context, model string, text string) ([]float32, error) {
 	return e.client.Embed(ctx, model, text)
 }

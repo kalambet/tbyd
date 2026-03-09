@@ -2,31 +2,86 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/kalambet/tbyd/internal/pipeline"
 	"github.com/kalambet/tbyd/internal/proxy"
+	"github.com/kalambet/tbyd/internal/storage"
 )
 
 const maxRequestBodySize = 1 << 20 // 1MB
 
+// InteractionSaver persists interactions and enqueues summarization jobs.
+type InteractionSaver interface {
+	SaveInteraction(i storage.Interaction) error
+	EnqueueJob(job storage.Job) error
+}
+
+// interactionRecord holds all data needed to persist an interaction.
+type interactionRecord struct {
+	UserQuery      string
+	EnrichedPrompt string
+	Model          string
+	CloudResponse  string
+}
+
+// interactionSaveLoop drains the save channel until ctx is cancelled,
+// then drains any remaining buffered interactions before returning.
+// Runs in a single goroutine to avoid unbounded goroutine spawning.
+func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan interactionRecord, enqueueSummarize bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			// Drain buffered interactions on shutdown to avoid silent data loss.
+			for {
+				select {
+				case rec := <-ch:
+					doSaveInteraction(saver, rec, enqueueSummarize)
+				default:
+					return
+				}
+			}
+		case rec, ok := <-ch:
+			if !ok {
+				return
+			}
+			doSaveInteraction(saver, rec, enqueueSummarize)
+		}
+	}
+}
+
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
 // REST API. When enricher is non-nil, incoming chat requests are enriched
 // before forwarding to the cloud proxy. Passing nil disables enrichment
-// (passthrough mode).
-func NewOpenAIHandler(p *proxy.Client, enricher *pipeline.Enricher) http.Handler {
+// (passthrough mode). When saver is non-nil and saveInteractions is true,
+// completed interactions are persisted and queued for summarization.
+//
+// appCtx controls the lifetime of the background save goroutine and must
+// outlive the server's request-handling lifetime. Pass context.Background()
+// in tests or when save is disabled.
+func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool) http.Handler {
 	r := chi.NewRouter()
+
+	// Start a bounded save channel and single consumer goroutine.
+	var saveCh chan interactionRecord
+	if saveInteractions && saver != nil {
+		saveCh = make(chan interactionRecord, 64)
+		go interactionSaveLoop(appCtx, saver, saveCh, enqueueSummarize)
+	}
 
 	r.Get("/health", handleHealth)
 	r.Get("/v1/models", handleModels(p))
-	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher))
+	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh))
 
 	return r
 }
@@ -52,7 +107,7 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 	}
 }
 
-func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.HandlerFunc {
+func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh chan<- interactionRecord) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		defer r.Body.Close()
@@ -68,7 +123,11 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.Ha
 			return
 		}
 
+		// Capture original user query before enrichment.
+		userQuery := extractLastUserMessage(req.Messages)
+
 		// Enrich if enricher is available.
+		var enrichedPrompt string
 		if enricher != nil {
 			enriched, meta := enricher.Enrich(r.Context(), req)
 			req = enriched
@@ -77,6 +136,10 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.Ha
 				"chunks_used", len(meta.ChunksUsed),
 				"duration_ms", meta.EnrichmentDurationMs,
 			)
+			// Capture enriched messages for interaction storage.
+			if b, err := json.Marshal(req.Messages); err == nil {
+				enrichedPrompt = string(b)
+			}
 		}
 
 		rc, err := p.Chat(r.Context(), req)
@@ -86,8 +149,9 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.Ha
 		}
 		defer rc.Close()
 
+		var responseBody string
 		if req.Stream {
-			streamResponse(w, rc)
+			responseBody = streamResponseCapture(w, rc)
 		} else {
 			body, err := io.ReadAll(rc)
 			if err != nil {
@@ -96,20 +160,123 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher) http.Ha
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(body)
+			responseBody = string(body)
+		}
+
+		// Enqueue interaction save via bounded channel (non-blocking).
+		if saveCh != nil && responseBody != "" {
+			rec := interactionRecord{
+				UserQuery:      userQuery,
+				EnrichedPrompt: enrichedPrompt,
+				Model:          req.Model,
+				CloudResponse:  responseBody,
+			}
+			select {
+			case saveCh <- rec:
+			default:
+				slog.Warn("interaction save channel full, dropping interaction")
+			}
 		}
 	}
 }
 
-func streamResponse(w http.ResponseWriter, rc io.Reader) {
+// extractLastUserMessage returns the content of the last user message from the messages array.
+// Handles both string content and multi-part content arrays (vision/multi-modal).
+func extractLastUserMessage(raw json.RawMessage) string {
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		return ""
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		// Try string content first.
+		var s string
+		if err := json.Unmarshal(msgs[i].Content, &s); err == nil {
+			return s
+		}
+		// Try array-of-parts (multi-modal).
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(msgs[i].Content, &parts); err == nil {
+			var texts []string
+			for _, p := range parts {
+				if p.Type == "text" && p.Text != "" {
+					texts = append(texts, p.Text)
+				}
+			}
+			return strings.Join(texts, " ")
+		}
+		return ""
+	}
+	return ""
+}
+
+// doSaveInteraction persists a completed interaction and optionally enqueues a summarization job.
+func doSaveInteraction(saver InteractionSaver, rec interactionRecord, enqueueSummarize bool) {
+	interactionID := uuid.New().String()
+	interaction := storage.Interaction{
+		ID:             interactionID,
+		CreatedAt:      time.Now().UTC(),
+		UserQuery:      rec.UserQuery,
+		EnrichedPrompt: rec.EnrichedPrompt,
+		CloudModel:     rec.Model,
+		CloudResponse:  rec.CloudResponse,
+		Status:         "completed",
+		VectorIDs:      "[]",
+	}
+
+	if err := saver.SaveInteraction(interaction); err != nil {
+		slog.Error("failed to save interaction",
+			"error", err,
+			"interaction_id", interactionID,
+			"model", rec.Model,
+		)
+		return
+	}
+
+	if !enqueueSummarize {
+		return
+	}
+
+	payload, err := json.Marshal(map[string]string{"interaction_id": interactionID})
+	if err != nil {
+		slog.Error("failed to marshal summarize job payload", "error", err, "interaction_id", interactionID)
+		return
+	}
+
+	job := storage.Job{
+		ID:          uuid.New().String(),
+		Type:        "interaction_summarize",
+		PayloadJSON: string(payload),
+	}
+	if err := saver.EnqueueJob(job); err != nil {
+		slog.Error("failed to enqueue summarize job", "error", err, "interaction_id", interactionID)
+	}
+}
+
+// streamResponseCapture streams SSE events to the client while reassembling
+// the assistant's content from streaming delta chunks. Returns the reassembled
+// content as a synthetic non-streaming response JSON for storage.
+func streamResponseCapture(w http.ResponseWriter, rc io.Reader) string {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
-		return
+		return ""
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	var contentBuilder strings.Builder
+	var streamModel string
 
 	reader := bufio.NewReader(rc)
 	for {
@@ -117,10 +284,34 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 		if len(line) > 0 {
 			w.Write(line)
 			flusher.Flush()
+
+			// Parse SSE data lines to extract delta content.
+			trimmed := strings.TrimSpace(string(line))
+			if strings.HasPrefix(trimmed, "data: ") {
+				data := strings.TrimPrefix(trimmed, "data: ")
+				if data != "[DONE]" {
+					var chunk struct {
+						Model   string `json:"model"`
+						Choices []struct {
+							Delta struct {
+								Content string `json:"content"`
+							} `json:"delta"`
+						} `json:"choices"`
+					}
+					if json.Unmarshal([]byte(data), &chunk) == nil {
+						if streamModel == "" && chunk.Model != "" {
+							streamModel = chunk.Model
+						}
+						for _, c := range chunk.Choices {
+							contentBuilder.WriteString(c.Delta.Content)
+						}
+					}
+				}
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("upstream stream read error: %v", err)
+				slog.Error("upstream stream read error", "error", err)
 				errPayload, marshalErr := json.Marshal(map[string]any{
 					"error": map[string]any{
 						"message": "upstream read error",
@@ -131,12 +322,34 @@ func streamResponse(w http.ResponseWriter, rc io.Reader) {
 					fmt.Fprintf(w, "data: %s\n\n", errPayload)
 					flusher.Flush()
 				} else {
-					log.Printf("failed to marshal stream error payload: %v", marshalErr)
+					slog.Error("failed to marshal stream error payload", "error", marshalErr)
 				}
 			}
 			break
 		}
 	}
+
+	// Build a synthetic non-streaming response for storage so that
+	// extractAssistantContent can parse it uniformly.
+	assembled := contentBuilder.String()
+	if assembled == "" {
+		return ""
+	}
+	synth, err := json.Marshal(map[string]any{
+		"model": streamModel,
+		"choices": []map[string]any{
+			{
+				"message": map[string]string{
+					"role":    "assistant",
+					"content": assembled,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return ""
+	}
+	return string(synth)
 }
 
 func hasMessages(raw json.RawMessage) bool {
