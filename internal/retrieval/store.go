@@ -151,41 +151,14 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		scores[item.ID] = item.Score
 	}
 
-	queryArgs := make([]interface{}, len(topIDs))
-	for i, id := range topIDs {
-		queryArgs[i] = id
-	}
-	fullQuery := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
-		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(topIDs)-1) + `)`
-
-	fullRows, err := s.db.Query(fullQuery, queryArgs...)
+	records, err := s.fetchRecordsByIDs(context.Background(), topIDs)
 	if err != nil {
-		return nil, fmt.Errorf("fetching top-K records: %w", err)
+		return nil, err
 	}
-	defer fullRows.Close()
 
-	var results []ScoredRecord
-	for fullRows.Next() {
-		var r Record
-		var blob []byte
-		var createdAt string
-		if err := fullRows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
-			return nil, fmt.Errorf("scanning full record: %w", err)
-		}
-		embedding, err := decodeFloat32s(blob)
-		if err != nil {
-			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
-		}
-		r.Embedding = embedding
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at: %w", err)
-		}
-		r.CreatedAt = t
+	results := make([]ScoredRecord, 0, len(records))
+	for _, r := range records {
 		results = append(results, ScoredRecord{Record: r, Score: scores[r.ID]})
-	}
-	if err := fullRows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating full records: %w", err)
 	}
 
 	// Sort results by score descending (IN query doesn't preserve order).
