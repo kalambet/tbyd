@@ -63,34 +63,70 @@ func (r *Retriever) RetrieveByIDs(ctx context.Context, ids []string) ([]ContextC
 	return recordsToChunks(records), nil
 }
 
+// defaultHybridRatio is the default vector weight when the intent doesn't specify one.
+const defaultHybridRatio = 0.7
+
 // RetrieveForIntent uses the extracted intent to perform richer context retrieval.
-// It embeds the original query and each entity separately, merges results,
-// deduplicates by SourceID, and returns the top-K chunks by score.
+// It selects between vector-only, hybrid, or keyword-heavy search based on
+// the intent's SearchStrategy. For hybrid/keyword_heavy strategies, it uses
+// SearchHybrid which combines BM25 keyword search with vector similarity.
 // On embedding failure, it returns an empty slice (graceful degradation).
-func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent intent.Intent, topK int) []ContextChunk {
+func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, extracted intent.Intent, topK int) []ContextChunk {
 	if topK <= 0 {
 		return nil
+	}
+
+	// Use intent's suggested topK if non-zero, capped at 100 to prevent
+	// excessive memory usage from prompt injection or runaway values.
+	const maxTopK = 100
+	if extracted.SuggestedTopK > 0 {
+		topK = extracted.SuggestedTopK
+		if topK > maxTopK {
+			topK = maxTopK
+		}
 	}
 
 	// Build a best-effort filter from intent topics.
 	// The SQLite backend currently ignores this; future backends (LanceDB)
 	// will use it for metadata filtering.
 	var filter string
-	if len(intent.Topics) > 0 {
-		filter = "topics:" + strings.Join(intent.Topics, ",")
+	if len(extracted.Topics) > 0 {
+		filter = "topics:" + strings.Join(extracted.Topics, ",")
 	}
 
-	// Search with original query vector. Use a larger topK per search to
-	// have enough candidates for deduplication and merging.
+	// Determine search strategy and hybrid ratio.
+	strategy := extracted.SearchStrategy
+	if strategy == "" {
+		strategy = "hybrid"
+	}
+	var hybridRatio float64
+	if extracted.HybridRatio != nil {
+		hybridRatio = *extracted.HybridRatio
+	} else if strategy == "keyword_heavy" {
+		hybridRatio = 0.3 // keyword-heavy: 30% vector, 70% keyword
+	} else {
+		hybridRatio = defaultHybridRatio
+	}
+
+	// For vector_only strategy, use the original multi-embedding approach.
+	if strategy == "vector_only" {
+		return r.retrieveVectorOnly(ctx, query, extracted, topK, filter)
+	}
+
+	// For hybrid and keyword_heavy: use SearchHybrid with entity expansion.
+	return r.retrieveHybrid(ctx, query, extracted, topK, float32(hybridRatio), filter)
+}
+
+// retrieveVectorOnly performs vector-only retrieval with entity expansion.
+func (r *Retriever) retrieveVectorOnly(ctx context.Context, query string, extracted intent.Intent, topK int, filter string) []ContextChunk {
 	perSearchK := topK
-	if len(intent.Entities) > 0 {
+	if len(extracted.Entities) > 0 {
 		perSearchK = topK * 2
 	}
 
-	// Embed and search query + each entity concurrently.
-	textsToSearch := make([]string, 0, 1+len(intent.Entities))
+	textsToSearch := make([]string, 0, 1+len(extracted.Entities))
 	textsToSearch = append(textsToSearch, query)
-	textsToSearch = append(textsToSearch, intent.Entities...)
+	textsToSearch = append(textsToSearch, extracted.Entities...)
 
 	var allScored []ScoredRecord
 	var mu sync.Mutex
@@ -102,13 +138,13 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		g.Go(func() error {
 			vec, err := r.embedder.Embed(gCtx, text)
 			if err != nil {
-				slog.Warn("retrieval embed failed, skipping", "text", text, "error", err)
+				slog.Warn("retrieval embed failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 
 			results, err := r.store.Search(expectedTable, vec, perSearchK, filter)
 			if err != nil {
-				slog.Warn("retrieval search failed, skipping", "text", text, "error", err)
+				slog.Warn("retrieval search failed, skipping", "text_len", len(text), "error", err)
 				return nil
 			}
 
@@ -125,11 +161,62 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		slog.Warn("retrieval group wait returned an error", "error", err)
 	}
 
+	return deduplicateAndTrim(allScored, topK)
+}
+
+// retrieveHybrid performs hybrid (vector + BM25) retrieval with entity expansion.
+func (r *Retriever) retrieveHybrid(ctx context.Context, query string, extracted intent.Intent, topK int, vectorWeight float32, filter string) []ContextChunk {
+	// Retrieve more candidates for merging/deduplication.
+	perSearchK := topK * 4
+
+	// Build search texts: original query + entities.
+	textsToSearch := make([]string, 0, 1+len(extracted.Entities))
+	textsToSearch = append(textsToSearch, query)
+	textsToSearch = append(textsToSearch, extracted.Entities...)
+
+	var allScored []ScoredRecord
+	var mu sync.Mutex
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(4)
+
+	for _, text := range textsToSearch {
+		g.Go(func() error {
+			vec, err := r.embedder.Embed(gCtx, text)
+			if err != nil {
+				slog.Warn("hybrid retrieval embed failed, skipping", "text_len", len(text), "error", err)
+				return nil
+			}
+
+			results, err := r.store.SearchHybrid(expectedTable, vec, text, perSearchK, vectorWeight, filter)
+			if err != nil {
+				slog.Warn("hybrid retrieval search failed, skipping", "text_len", len(text), "error", err)
+				return nil
+			}
+
+			if len(results) > 0 {
+				mu.Lock()
+				allScored = append(allScored, results...)
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		slog.Warn("hybrid retrieval group wait returned an error", "error", err)
+	}
+
+	return deduplicateAndTrim(allScored, topK)
+}
+
+// deduplicateAndTrim deduplicates ScoredRecords by SourceID (keeping highest score),
+// sorts by score descending, and trims to topK.
+func deduplicateAndTrim(allScored []ScoredRecord, topK int) []ContextChunk {
 	if len(allScored) == 0 {
 		return nil
 	}
 
-	// Deduplicate by SourceID, keeping the highest score per source.
 	seen := make(map[string]ScoredRecord)
 	for _, sr := range allScored {
 		if existing, ok := seen[sr.SourceID]; !ok || sr.Score > existing.Score {
@@ -142,12 +229,10 @@ func (r *Retriever) RetrieveForIntent(ctx context.Context, query string, intent 
 		deduped = append(deduped, sr)
 	}
 
-	// Sort by score descending.
 	sort.Slice(deduped, func(i, j int) bool {
 		return deduped[i].Score > deduped[j].Score
 	})
 
-	// Trim to topK.
 	if len(deduped) > topK {
 		deduped = deduped[:topK]
 	}

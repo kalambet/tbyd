@@ -132,3 +132,40 @@ func TestExtract_EmptyQuery(t *testing.T) {
 		t.Errorf("IntentType = %q, want zero value for empty query", intent.IntentType)
 	}
 }
+
+func TestExtract_SearchStrategy(t *testing.T) {
+	mock := &mockChatter{
+		response: `{"intent_type":"recall","entities":["Kubernetes"],"topics":["devops"],"context_needs":["docs"],"is_private":false,"search_strategy":"hybrid","hybrid_ratio":0.6,"suggested_top_k":10}`,
+	}
+	e := NewExtractor(mock, "phi3.5")
+	got := e.Extract(context.Background(), "find docs about Kubernetes", nil, "")
+
+	if got.SearchStrategy != "hybrid" {
+		t.Errorf("SearchStrategy = %q, want %q", got.SearchStrategy, "hybrid")
+	}
+	if got.HybridRatio == nil || *got.HybridRatio != 0.6 {
+		t.Errorf("HybridRatio = %v, want 0.6", got.HybridRatio)
+	}
+	if got.SuggestedTopK != 10 {
+		t.Errorf("SuggestedTopK = %d, want 10", got.SuggestedTopK)
+	}
+}
+
+func TestExtract_DefaultStrategy(t *testing.T) {
+	// When the LLM doesn't return search fields, they should be zero values.
+	mock := &mockChatter{
+		response: `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":false}`,
+	}
+	e := NewExtractor(mock, "phi3.5")
+	got := e.Extract(context.Background(), "how does Go handle concurrency", nil, "")
+
+	if got.SearchStrategy != "" {
+		t.Errorf("SearchStrategy = %q, want empty (default)", got.SearchStrategy)
+	}
+	if got.HybridRatio != nil {
+		t.Errorf("HybridRatio = %v, want nil (default)", got.HybridRatio)
+	}
+	if got.SuggestedTopK != 0 {
+		t.Errorf("SuggestedTopK = %d, want 0 (default)", got.SuggestedTopK)
+	}
+}

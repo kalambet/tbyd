@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -151,41 +152,14 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		scores[item.ID] = item.Score
 	}
 
-	queryArgs := make([]interface{}, len(topIDs))
-	for i, id := range topIDs {
-		queryArgs[i] = id
-	}
-	fullQuery := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
-		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(topIDs)-1) + `)`
-
-	fullRows, err := s.db.Query(fullQuery, queryArgs...)
+	records, err := s.fetchRecordsByIDs(context.Background(), topIDs)
 	if err != nil {
-		return nil, fmt.Errorf("fetching top-K records: %w", err)
+		return nil, err
 	}
-	defer fullRows.Close()
 
-	var results []ScoredRecord
-	for fullRows.Next() {
-		var r Record
-		var blob []byte
-		var createdAt string
-		if err := fullRows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
-			return nil, fmt.Errorf("scanning full record: %w", err)
-		}
-		embedding, err := decodeFloat32s(blob)
-		if err != nil {
-			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
-		}
-		r.Embedding = embedding
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at: %w", err)
-		}
-		r.CreatedAt = t
+	results := make([]ScoredRecord, 0, len(records))
+	for _, r := range records {
 		results = append(results, ScoredRecord{Record: r, Score: scores[r.ID]})
-	}
-	if err := fullRows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating full records: %w", err)
 	}
 
 	// Sort results by score descending (IN query doesn't preserve order).
@@ -277,45 +251,7 @@ func (s *SQLiteStore) GetByIDs(ctx context.Context, table string, ids []string) 
 	if err := validateTable(table); err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	queryArgs := make([]interface{}, len(ids))
-	for i, id := range ids {
-		queryArgs[i] = id
-	}
-
-	query := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
-		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
-
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("querying by IDs: %w", err)
-	}
-	defer rows.Close()
-
-	var records []Record
-	for rows.Next() {
-		var r Record
-		var blob []byte
-		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
-			return nil, fmt.Errorf("scanning row: %w", err)
-		}
-		embedding, err := decodeFloat32s(blob)
-		if err != nil {
-			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
-		}
-		r.Embedding = embedding
-		t, err := time.Parse(time.RFC3339, createdAt)
-		if err != nil {
-			return nil, fmt.Errorf("parsing created_at for id %s: %w", r.ID, err)
-		}
-		r.CreatedAt = t
-		records = append(records, r)
-	}
-	return records, rows.Err()
+	return s.fetchRecordsByIDs(ctx, ids)
 }
 
 // encodeFloat32s serializes a float32 slice to little-endian bytes.
@@ -385,6 +321,252 @@ func cosineSimilarity(a, b []float32, aNorm float32) float32 {
 		return 0
 	}
 	return float32(dot / (float64(aNorm) * bNorm))
+}
+
+// SearchKeyword performs BM25 keyword search via the FTS5 virtual table.
+// Scores are normalized to 0–1 using min-max normalization.
+func (s *SQLiteStore) SearchKeyword(table string, query string, topK int, filter string) ([]ScoredRecord, error) {
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
+	if topK <= 0 || query == "" {
+		return nil, nil
+	}
+
+	// FTS5 rank returns negative BM25 scores (more negative = better match).
+	// We retrieve extra candidates to allow for min-max normalization.
+	rows, err := s.db.Query(`
+		SELECT doc_id, rank
+		FROM context_vectors_fts
+		WHERE text_chunk MATCH ?
+		ORDER BY rank
+		LIMIT ?`, query, topK*2)
+	if err != nil {
+		return nil, fmt.Errorf("FTS5 keyword search: %w", err)
+	}
+	defer rows.Close()
+
+	type ftsHit struct {
+		docID string
+		rank  float64 // raw BM25 rank (negative)
+	}
+	var hits []ftsHit
+	for rows.Next() {
+		var h ftsHit
+		if err := rows.Scan(&h.docID, &h.rank); err != nil {
+			return nil, fmt.Errorf("scanning FTS5 result: %w", err)
+		}
+		hits = append(hits, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating FTS5 results: %w", err)
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+
+	// Min-max normalize the raw BM25 ranks to 0–1.
+	// BM25 ranks are negative; more negative = better match.
+	minRank := hits[0].rank
+	maxRank := hits[0].rank
+	for _, h := range hits[1:] {
+		if h.rank < minRank {
+			minRank = h.rank
+		}
+		if h.rank > maxRank {
+			maxRank = h.rank
+		}
+	}
+
+	normalizedScores := make(map[string]float32, len(hits))
+	rankRange := maxRank - minRank
+	for _, h := range hits {
+		var score float32
+		if rankRange == 0 {
+			score = 1.0 // all same rank → all get max score
+		} else {
+			// Invert: most negative (best) → 1.0, least negative → 0.0
+			score = float32((maxRank - h.rank) / rankRange)
+		}
+		normalizedScores[h.docID] = score
+	}
+
+	// Trim to topK doc IDs.
+	if len(hits) > topK {
+		hits = hits[:topK]
+	}
+
+	// Fetch full records.
+	docIDs := make([]string, len(hits))
+	for i, h := range hits {
+		docIDs[i] = h.docID
+	}
+
+	records, err := s.fetchRecordsByIDs(context.Background(), docIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]ScoredRecord, 0, len(records))
+	for _, r := range records {
+		results = append(results, ScoredRecord{Record: r, Score: normalizedScores[r.ID]})
+	}
+
+	sortByScore(results)
+	return results, nil
+}
+
+// SearchHybrid combines vector similarity and BM25 keyword search using
+// weighted Reciprocal Rank Fusion (RRF). vectorWeight controls the blend:
+// vector RRF scores are scaled by vectorWeight, keyword scores by (1-vectorWeight).
+// Results are deduplicated by record ID.
+func (s *SQLiteStore) SearchHybrid(table string, vector []float32, query string, topK int, vectorWeight float32, filter string) ([]ScoredRecord, error) {
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
+	if topK <= 0 {
+		return nil, nil
+	}
+
+	// If no keyword query, fall back to vector-only search.
+	if query == "" {
+		return s.Search(table, vector, topK, filter)
+	}
+
+	// Clamp vectorWeight to [0, 1].
+	if vectorWeight < 0 {
+		vectorWeight = 0
+	}
+	if vectorWeight > 1 {
+		vectorWeight = 1
+	}
+
+	// Retrieve more candidates than needed for fusion.
+	candidateK := topK * 4
+
+	// Run vector and keyword searches in parallel.
+	type searchResult struct {
+		records []ScoredRecord
+		err     error
+	}
+	vectorCh := make(chan searchResult, 1)
+	keywordCh := make(chan searchResult, 1)
+
+	go func() {
+		r, err := s.Search(table, vector, candidateK, filter)
+		vectorCh <- searchResult{r, err}
+	}()
+	go func() {
+		r, err := s.SearchKeyword(table, query, candidateK, filter)
+		keywordCh <- searchResult{r, err}
+	}()
+
+	vecResult := <-vectorCh
+	kwResult := <-keywordCh
+
+	// If one search fails, log it but continue with the other.
+	if vecResult.err != nil {
+		slog.Warn("hybrid search: vector component failed", "error", vecResult.err)
+	}
+	if kwResult.err != nil {
+		slog.Warn("hybrid search: keyword component failed", "error", kwResult.err)
+	}
+
+	// If both fail, return error.
+	if vecResult.err != nil && kwResult.err != nil {
+		return nil, fmt.Errorf("both searches failed: vector: %w, keyword: %v", vecResult.err, kwResult.err)
+	}
+
+	vectorResults := vecResult.records
+	keywordResults := kwResult.records
+
+	// Weighted Reciprocal Rank Fusion with k=60.
+	// Vector contributions are scaled by vectorWeight, keyword by (1-vectorWeight).
+	const rrfK = 60
+	keywordWeight := float64(1 - vectorWeight)
+	vecW := float64(vectorWeight)
+
+	type fusedEntry struct {
+		record ScoredRecord
+		score  float64
+	}
+	fused := make(map[string]*fusedEntry)
+
+	for rank, sr := range vectorResults {
+		id := sr.ID
+		rrfScore := vecW / float64(rrfK+rank+1) // rank is 0-based, +1 to make 1-based
+		if entry, ok := fused[id]; ok {
+			entry.score += rrfScore
+		} else {
+			fused[id] = &fusedEntry{record: sr, score: rrfScore}
+		}
+	}
+
+	for rank, sr := range keywordResults {
+		id := sr.ID
+		rrfScore := keywordWeight / float64(rrfK+rank+1)
+		if entry, ok := fused[id]; ok {
+			entry.score += rrfScore
+		} else {
+			fused[id] = &fusedEntry{record: sr, score: rrfScore}
+		}
+	}
+
+	// Collect and sort by fused score.
+	results := make([]ScoredRecord, 0, len(fused))
+	for _, entry := range fused {
+		entry.record.Score = float32(entry.score)
+		results = append(results, entry.record)
+	}
+
+	sortByScore(results)
+
+	if len(results) > topK {
+		results = results[:topK]
+	}
+	return results, nil
+}
+
+// fetchRecordsByIDs fetches full records from context_vectors by their IDs.
+func (s *SQLiteStore) fetchRecordsByIDs(ctx context.Context, ids []string) ([]Record, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	queryArgs := make([]interface{}, len(ids))
+	for i, id := range ids {
+		queryArgs[i] = id
+	}
+	q := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
+		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+
+	rows, err := s.db.QueryContext(ctx, q, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("fetching records by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var records []Record
+	for rows.Next() {
+		var r Record
+		var blob []byte
+		var createdAt string
+		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
+			return nil, fmt.Errorf("scanning record: %w", err)
+		}
+		embedding, err := decodeFloat32s(blob)
+		if err != nil {
+			return nil, fmt.Errorf("decoding embedding for %s: %w", r.ID, err)
+		}
+		r.Embedding = embedding
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		r.CreatedAt = t
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 // idScoreHeap is a min-heap of idScore ordered by Score.

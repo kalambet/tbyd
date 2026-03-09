@@ -11,7 +11,7 @@ func TestPromptContainsSchema(t *testing.T) {
 	messages := BuildPrompt("test query", nil, "")
 
 	system := messages[0].Content
-	for _, field := range []string{"intent_type", "entities", "topics", "context_needs", "is_private"} {
+	for _, field := range []string{"intent_type", "entities", "topics", "context_needs", "is_private", "search_strategy", "hybrid_ratio", "suggested_top_k"} {
 		if !strings.Contains(system, field) {
 			t.Errorf("system prompt does not contain schema field %q", field)
 		}
