@@ -47,10 +47,24 @@ type RetrievalConfig struct {
 	TopK int // default 5
 }
 
+// DefaultSemanticThreshold is the default cosine similarity threshold for L2
+// semantic cache hits. Empirically validated against nomic-embed-text:
+// 0% false-positive rate, separation gap 0.17 (min match 0.91, max non-match 0.74).
+// Set 0.01 below min match (0.91) to extend coverage to borderline near-duplicates
+// outside the test set; non-match ceiling (0.74) leaves 0.16 false-positive margin.
+// See cache/threshold_test.go. Regenerate fixtures and re-evaluate if changing
+// the embed model.
+const DefaultSemanticThreshold = 0.90
+
 type EnrichmentConfig struct {
 	RerankingEnabled   bool
 	RerankingTimeout   string  // duration string, e.g. "5s"
 	RerankingThreshold float64 // minimum relevance score to keep a chunk
+
+	CacheEnabled           bool
+	CacheSemanticThreshold float64 // cosine similarity threshold for semantic cache hit
+	CacheExactTTL          string  // duration string, e.g. "5m"
+	CacheSemanticTTL       string  // duration string, e.g. "30m"
 }
 
 func defaults() Config {
@@ -82,6 +96,11 @@ func defaults() Config {
 			RerankingEnabled:   true,
 			RerankingTimeout:   "5s",
 			RerankingThreshold: 0.3,
+
+			CacheEnabled:           true,
+			CacheSemanticThreshold: DefaultSemanticThreshold,
+			CacheExactTTL:          "5m",
+			CacheSemanticTTL:       "30m",
 		},
 	}
 }

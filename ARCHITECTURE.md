@@ -909,7 +909,7 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **1.7** Enrichment pipeline orchestrator
 - [x] **1.8** Hybrid retrieval (BM25 + vector search with adaptive blending)
 - [x] **1.9** Retrieval reranking (cross-encoder / LLM-based)
-- [ ] **1.10** Query-level caching (exact + semantic)
+- [x] **1.10** Query-level caching (exact + semantic)
 
 ### Phase 2 — User Surfaces
 - [ ] **2.1** Universal ingestion HTTP API

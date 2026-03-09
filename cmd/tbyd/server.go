@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kalambet/tbyd/internal/api"
+	qcache "github.com/kalambet/tbyd/internal/cache"
 	"github.com/kalambet/tbyd/internal/composer"
 	"github.com/kalambet/tbyd/internal/config"
 	"github.com/kalambet/tbyd/internal/engine"
@@ -163,7 +164,34 @@ func runServer() error {
 		cfg.Enrichment.RerankingThreshold,
 		cfg.Retrieval.TopK,
 	)
-	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, reranker, cfg.Retrieval.TopK)
+
+	// Build query cache. Uses the same embedder as retrieval so that cosine
+	// similarity scores are comparable between cache lookups and retrieval.
+	exactTTL, err := time.ParseDuration(cfg.Enrichment.CacheExactTTL)
+	if err != nil {
+		slog.Warn("invalid cache exact TTL, using default 5m", "value", cfg.Enrichment.CacheExactTTL, "error", err)
+		exactTTL = 5 * time.Minute
+	}
+	semanticTTL, err := time.ParseDuration(cfg.Enrichment.CacheSemanticTTL)
+	if err != nil {
+		slog.Warn("invalid cache semantic TTL, using default 30m", "value", cfg.Enrichment.CacheSemanticTTL, "error", err)
+		semanticTTL = 30 * time.Minute
+	}
+	queryCache := qcache.NewQueryCache(
+		embedder,
+		cfg.Enrichment.CacheEnabled,
+		cfg.Enrichment.CacheSemanticThreshold,
+		exactTTL,
+		semanticTTL,
+	)
+	defer queryCache.Stop()
+
+	enricher := pipeline.NewEnricher(extractor, retriever, profileMgr, comp, reranker, cfg.Retrieval.TopK, queryCache)
+
+	// Wire cache invalidation: profile updates invalidate ALL cached enrichments
+	// (not topic-selective) because profile fields like tone, role, and detail
+	// level affect every enriched response, not just topic-specific ones.
+	profileMgr.OnInvalidate(func() { queryCache.Invalidate() })
 
 	// Retrieve API token for bearer auth on management endpoints.
 	apiToken, err := config.GetAPIToken(config.NewKeychain())
