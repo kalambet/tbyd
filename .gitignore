@@ -58,3 +58,4 @@ config.toml
 *.swp
 *.swo
 descr.md
+macos/.build/
