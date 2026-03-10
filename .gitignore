@@ -59,3 +59,8 @@ config.toml
 *.swo
 descr.md
 macos/.build/
+
+# Claude Code local state (agents/ and skills/ are intentionally committed)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/memory/
