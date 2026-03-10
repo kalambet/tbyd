@@ -39,13 +39,16 @@ public final class ProcessManager {
         proc.executableURL = URL(fileURLWithPath: binaryPath)
         proc.arguments = arguments
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        let stderrPipe = Pipe()
+        proc.standardError = stderrPipe
         proc.terminationHandler = { [weak self] p in
             let exitCode = p.terminationStatus
             let reason = p.terminationReason
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrOutput = String(data: stderrData, encoding: .utf8)
             Task { @MainActor [weak self] in
                 guard let self, self.process === p else { return }
-                self.handleTermination(exitCode: exitCode, reason: reason)
+                self.handleTermination(exitCode: exitCode, reason: reason, stderr: stderrOutput)
             }
         }
 
@@ -71,10 +74,11 @@ public final class ProcessManager {
         process?.isRunning ?? false
     }
 
-    private func handleTermination(exitCode: Int32, reason: Process.TerminationReason) {
+    private func handleTermination(exitCode: Int32, reason: Process.TerminationReason, stderr: String?) {
         process = nil
         if exitCode != 0 && reason != .uncaughtSignal {
-            state = .error("Process exited with code \(exitCode)")
+            let detail = stderr.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            state = .error(detail ?? "Process exited with code \(exitCode)")
         } else {
             state = .stopped
         }

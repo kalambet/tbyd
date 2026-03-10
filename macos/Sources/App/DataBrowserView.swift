@@ -41,6 +41,16 @@ struct DataBrowserView: View {
             }
         }
         .searchable(text: $viewModel.searchText, prompt: "Search...")
+        .overlay(alignment: .bottom) {
+            if let error = viewModel.errorMessage {
+                Text(error)
+                    .foregroundStyle(.white)
+                    .font(.caption)
+                    .padding(8)
+                    .background(.red.opacity(0.85), in: RoundedRectangle(cornerRadius: 6))
+                    .padding()
+            }
+        }
         .task {
             await viewModel.loadAll(client: appState.apiClient)
         }

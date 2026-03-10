@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBYDKit
 
@@ -8,6 +9,7 @@ final class AppState {
     let processManager: ProcessManager
     let poller: StatusPoller
     var errorMessage: String?
+    private var terminationObserver: Any?
 
     init() {
         let token = try? KeychainService.get(.apiToken)
@@ -16,6 +18,17 @@ final class AppState {
         self.processManager = ProcessManager()
         self.poller = StatusPoller(client: client)
         poller.startPolling()
+
+        let pm = processManager
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                pm.stop()
+            }
+        }
     }
 
     var serverStatus: StatusPoller.Status {

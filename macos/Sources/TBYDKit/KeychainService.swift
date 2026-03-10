@@ -3,14 +3,14 @@ import Security
 
 /// Provides read/write access to the macOS Keychain for tbyd secrets.
 public enum KeychainService: Sendable {
-    private static let service = "tbyd"
+    public static let defaultService = "tbyd"
 
     public enum Account: String, Sendable {
         case apiToken = "tbyd-api-token"
         case openRouterAPIKey = "openrouter_api_key"
     }
 
-    public static func get(_ account: Account) throws -> String? {
+    public static func get(_ account: Account, service: String = defaultService) throws -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -34,7 +34,7 @@ public enum KeychainService: Sendable {
         return value
     }
 
-    public static func set(_ account: Account, value: String) throws {
+    public static func set(_ account: Account, value: String, service: String = defaultService) throws {
         guard let data = value.data(using: .utf8) else { return }
 
         // Try to update first.
@@ -60,7 +60,7 @@ public enum KeychainService: Sendable {
         }
     }
 
-    public static func delete(_ account: Account) throws {
+    public static func delete(_ account: Account, service: String = defaultService) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

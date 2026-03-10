@@ -106,6 +106,9 @@ final class ProfileEditorViewModel {
                     for (key, value) in parsed {
                         updates[key] = value
                     }
+                } else {
+                    errorMessage = "Invalid JSON in raw editor"
+                    return
                 }
             }
 
