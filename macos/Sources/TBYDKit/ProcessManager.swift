@@ -3,7 +3,7 @@ import Foundation
 /// Manages the lifecycle of the tbyd Go binary.
 @MainActor @Observable
 public final class ProcessManager {
-    public enum State: Sendable {
+    public enum State: Sendable, Equatable {
         case stopped
         case starting
         case running
@@ -15,9 +15,11 @@ public final class ProcessManager {
 
     /// The path to the tbyd binary. Defaults to the bundled binary inside the app.
     public let binaryPath: String
+    private let arguments: [String]
 
-    public init(binaryPath: String? = nil) {
+    public init(binaryPath: String? = nil, arguments: [String] = ["start"]) {
         self.binaryPath = binaryPath ?? Self.bundledBinaryPath()
+        self.arguments = arguments
     }
 
     /// Resolves the path to the tbyd binary bundled inside the .app.
@@ -35,14 +37,15 @@ public final class ProcessManager {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["start"]
+        proc.arguments = arguments
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         proc.terminationHandler = { [weak self] p in
             let exitCode = p.terminationStatus
             let reason = p.terminationReason
             Task { @MainActor [weak self] in
-                self?.handleTermination(exitCode: exitCode, reason: reason)
+                guard let self, self.process === p else { return }
+                self.handleTermination(exitCode: exitCode, reason: reason)
             }
         }
 

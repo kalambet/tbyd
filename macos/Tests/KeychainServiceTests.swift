@@ -2,8 +2,8 @@ import Testing
 import Foundation
 @testable import TBYDKit
 
-@Suite("PreferencesViewModel", .serialized)
-struct PreferencesViewModelTests {
+@Suite("KeychainService", .serialized)
+struct KeychainServiceTests {
 
     @Test("Loads API key from keychain round-trip")
     func loadsAPIKey() throws {

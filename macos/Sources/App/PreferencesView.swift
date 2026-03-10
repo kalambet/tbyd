@@ -72,9 +72,7 @@ final class PreferencesViewModel {
     var availableModels: [APIClient.Model] = []
     var errorMessage: String?
 
-    private var tbydBinaryPath: String {
-        ProcessManager().binaryPath
-    }
+    private let tbydBinaryPath = ProcessManager().binaryPath
 
     func load(client: APIClient) async {
         apiKey = (try? KeychainService.get(.openRouterAPIKey)) ?? ""
@@ -172,9 +170,8 @@ final class PreferencesViewModel {
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             try process.run()
-            process.waitUntilExit()
-
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             guard let output = String(data: data, encoding: .utf8) else { return [:] }
 
             var result: [String: String] = [:]

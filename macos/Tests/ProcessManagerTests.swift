@@ -5,37 +5,40 @@ import Foundation
 @Suite("ProcessManager")
 struct ProcessManagerTests {
 
-    @Test("Start spawns binary with correct path")
+    @Test("Start spawns binary and transitions to running")
     @MainActor
     func startSpawnsBinary() throws {
-        // Use /usr/bin/true as a safe binary that exits immediately.
-        let manager = ProcessManager(binaryPath: "/usr/bin/true")
+        let manager = ProcessManager(binaryPath: "/bin/sleep", arguments: ["60"])
         try manager.start()
-        // Process should have started (may already exited since /usr/bin/true exits immediately).
-        // The key verification is that no exception was thrown.
+        #expect(manager.state == .running)
+        #expect(manager.isRunning)
+        manager.stop()
     }
 
     @Test("Stop sends SIGTERM and transitions to stopped state")
     @MainActor
     func stopTransitionsToStopped() throws {
-        // Use /bin/sleep as a long-running process.
-        let manager = ProcessManager(binaryPath: "/bin/sleep")
-        // Note: ProcessManager passes ["start"] as arguments, so sleep will fail,
-        // but we can verify the state management logic.
+        let manager = ProcessManager(binaryPath: "/bin/sleep", arguments: ["60"])
+        try manager.start()
+        #expect(manager.isRunning)
         manager.stop()
         if case .stopped = manager.state {
             // expected
         } else {
             Issue.record("Expected stopped state, got \(manager.state)")
         }
+        #expect(!manager.isRunning)
     }
 
     @Test("Double start does not spawn second process")
     @MainActor
     func doubleStartNoOp() throws {
-        let manager = ProcessManager(binaryPath: "/usr/bin/true")
+        let manager = ProcessManager(binaryPath: "/bin/sleep", arguments: ["60"])
         try manager.start()
+        #expect(manager.state == .running)
         // Second start should be a no-op (guard in start()).
         try manager.start()
+        #expect(manager.state == .running)
+        manager.stop()
     }
 }

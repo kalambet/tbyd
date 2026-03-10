@@ -93,11 +93,21 @@ final class ProfileEditorViewModel {
     func save(client: APIClient) async {
         do {
             var updates: [String: Any] = [:]
-            if !tone.isEmpty { updates["tone"] = tone }
-            if !detailLevel.isEmpty { updates["detail_level"] = detailLevel }
-            if !responseLength.isEmpty { updates["response_length"] = responseLength }
-            if !role.isEmpty { updates["role"] = role }
-            if !preferredLanguages.isEmpty { updates["preferred_languages"] = preferredLanguages }
+            if tone != originalTone { updates["tone"] = tone }
+            if detailLevel != originalDetailLevel { updates["detail_level"] = detailLevel }
+            if responseLength != originalResponseLength { updates["response_length"] = responseLength }
+            if role != originalRole { updates["role"] = role }
+            if preferredLanguages != originalPreferredLanguages { updates["preferred_languages"] = preferredLanguages }
+
+            // If rawJSON changed, parse and merge all fields from it
+            if rawJSON != originalJSON {
+                if let data = rawJSON.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    for (key, value) in parsed {
+                        updates[key] = value
+                    }
+                }
+            }
 
             try await client.patchProfile(updates)
             saved = true

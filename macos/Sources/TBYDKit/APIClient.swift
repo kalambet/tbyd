@@ -213,6 +213,10 @@ public struct AnyCodable: Codable, @unchecked Sendable {
             try container.encode(double)
         case let string as String:
             try container.encode(string)
+        case let array as [Any]:
+            try container.encode(array.map { AnyCodable($0) })
+        case let dict as [String: Any]:
+            try container.encode(dict.mapValues { AnyCodable($0) })
         default:
             throw EncodingError.invalidValue(value, .init(codingPath: encoder.codingPath, debugDescription: "Unsupported type"))
         }

@@ -32,7 +32,8 @@ final class AppState {
     }
 
     var statusIconColor: Color {
-        switch poller.status {
+        if case .starting = processManager.state { return .orange }
+        return switch poller.status {
         case .unknown: .gray
         case .running: .green
         case .stopped: .gray
@@ -41,7 +42,8 @@ final class AppState {
     }
 
     var statusLabel: String {
-        switch poller.status {
+        if case .starting = processManager.state { return "tbyd — starting..." }
+        return switch poller.status {
         case .unknown: "tbyd — checking..."
         case .running: "tbyd — running"
         case .stopped: "tbyd — stopped"
