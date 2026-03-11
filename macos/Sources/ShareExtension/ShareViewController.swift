@@ -184,23 +184,27 @@ public final class ShareViewController: NSViewController {
     var resolvedItem: SharedItem?
 
     func loadSharedItems(from context: NSExtensionContext) async {
-        guard let extensionItem = context.inputItems.first as? NSExtensionItem else {
+        let extensionItems = context.inputItems.compactMap { $0 as? NSExtensionItem }
+        guard !extensionItems.isEmpty else {
             showError("No content was shared.")
             return
         }
 
-        guard let provider = extensionItem.attachments?.first else {
-            showError("No content was shared.")
-            return
+        for extensionItem in extensionItems {
+            guard let providers = extensionItem.attachments, !providers.isEmpty else { continue }
+            for provider in providers {
+                do {
+                    let item = try await resolveItem(from: provider, extensionItem: extensionItem)
+                    resolvedItem = item
+                    previewLabel.stringValue = item.preview
+                    return
+                } catch {
+                    continue  // try next provider
+                }
+            }
         }
 
-        do {
-            let item = try await resolveItem(from: provider, extensionItem: extensionItem)
-            resolvedItem = item
-            previewLabel.stringValue = item.preview
-        } catch {
-            showError("Could not load shared content: \(error.localizedDescription)")
-        }
+        showError("No supported content was found in the shared items.")
     }
 
     /// Resolves an `NSItemProvider` into a `SharedItem`, checking for oversized files.
@@ -224,21 +228,29 @@ public final class ShareViewController: NSViewController {
         }
 
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-            let imageItem = try await provider.loadItem(forTypeIdentifier: UTType.image.identifier)
-            if let imageData = imageItem as? Data {
-                let base64 = imageData.base64EncodedString()
-                return SharedItem(
-                    type: "file",
-                    preview: "image.png (\(imageData.count / 1024) KB)",
-                    title: "image.png",
-                    content: base64,
-                    metadata: [
-                        "filename": "image.png",
-                        "mime_type": "image/png",
-                        "byte_count": String(imageData.count),
-                    ]
-                )
+            let imageData: Data = try await withCheckedThrowingContinuation { continuation in
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else if let data = data {
+                        continuation.resume(returning: data)
+                    } else {
+                        continuation.resume(throwing: ShareError.unsupportedContentType)
+                    }
+                }
             }
+            let base64 = imageData.base64EncodedString()
+            return SharedItem(
+                type: "file",
+                preview: "image.png (\(imageData.count / 1024) KB)",
+                title: "image.png",
+                content: base64,
+                metadata: [
+                    "filename": "image.png",
+                    "mime_type": "image/png",
+                    "byte_count": String(imageData.count),
+                ]
+            )
         }
 
         if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
@@ -261,12 +273,12 @@ public final class ShareViewController: NSViewController {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
 
-        var result = ""
+        var parts: [String] = []
         while true {
             guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else { break }
-            result += chunk.base64EncodedString()
+            parts.append(chunk.base64EncodedString())
         }
-        return result
+        return parts.joined()
     }
 
     private func resolveFileURL(_ url: URL, extensionItem: NSExtensionItem) async throws -> SharedItem {
@@ -343,10 +355,7 @@ public final class ShareViewController: NSViewController {
             setLoading(false)
             context?.completeRequest(returningItems: [], completionHandler: nil)
         } catch let error as URLError where
-            error.code == .cannotConnectToHost ||
-            error.code == .networkConnectionLost ||
-            error.code == .notConnectedToInternet ||
-            error.code == .timedOut {
+            [.cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .timedOut].contains(error.code) {
             setLoading(false)
             showError("tbyd is not running. Start it from the menubar.")
         } catch {
@@ -365,6 +374,8 @@ public final class ShareViewController: NSViewController {
     private func setLoading(_ loading: Bool) {
         saveButton.isEnabled = !loading
         if loading {
+            errorLabel.isHidden = true
+            errorLabel.stringValue = ""
             progressIndicator.isHidden = false
             progressIndicator.startAnimation(nil)
         } else {

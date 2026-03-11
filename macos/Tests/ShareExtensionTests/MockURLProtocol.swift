@@ -28,7 +28,18 @@ class BaseMockProtocol: URLProtocol, @unchecked Sendable {
             defer { buffer.deallocate() }
             while stream.hasBytesAvailable {
                 let read = stream.read(buffer, maxLength: bufferSize)
-                if read > 0 { data.append(buffer, count: read) }
+                if read > 0 {
+                    data.append(buffer, count: read)
+                } else if read == 0 {
+                    // EOF
+                    break
+                } else {
+                    // Stream error
+                    stream.close()
+                    let error = stream.streamError ?? URLError(.cannotDecodeRawData)
+                    client?.urlProtocol(self, didFailWithError: error)
+                    return
+                }
             }
             stream.close()
             bodyData = data.isEmpty ? nil : data

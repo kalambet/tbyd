@@ -131,9 +131,9 @@ struct ShareViewControllerTests {
         let json = try decodeBody(body)
         #expect(json["type"] as? String == "file")
         #expect(json["content"] as? String == expectedBase64)
-        let metadata = json["metadata"] as? [String: String]
-        #expect(metadata?["mime_type"] == "application/pdf")
-        #expect(metadata?["byte_count"] == "16")
+        let metadata = json["metadata"] as? [String: Any]
+        #expect(metadata?["mime_type"] as? String == "application/pdf")
+        #expect(metadata?["byte_count"] as? String == "16")
     }
 
     // MARK: - testServerNotRunning

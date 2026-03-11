@@ -7,10 +7,13 @@ public actor IngestClient {
     private let session: URLSession
 
     public init(
-        ingestURL: URL = URL(string: "http://localhost:4000/ingest")!,
+        ingestURLString: String = "http://localhost:4000/ingest",
         session: URLSession = .shared
     ) {
-        self.ingestURL = ingestURL
+        guard let url = URL(string: ingestURLString) else {
+            fatalError("Invalid URL string for IngestClient: \(ingestURLString)")
+        }
+        self.ingestURL = url
         self.session = session
     }
 
