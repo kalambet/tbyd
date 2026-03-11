@@ -282,7 +282,7 @@ public final class ShareViewController: NSViewController {
     }
 
     private func resolveFileURL(_ url: URL, extensionItem: NSExtensionItem) async throws -> SharedItem {
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path())
         let fileSize = (attrs[.size] as? Int) ?? 0
 
         if fileSize > Self.largeFileSizeBytes {
