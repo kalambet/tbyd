@@ -1,6 +1,8 @@
 Create an agent team for this feature:
 
-Teammate "apple-builder" should implement the issue 2.6 from @docs/phase-2-user-surfaces.md. Use the apple-dev skill.
+Teammate "ai-builder" should should implement the issue 2.8 from @docs/phase-2-user-surfaces.md. Use the ai-dev skill. They should be consulted about any AI decisions.
+
+Teammate "apple-builder" should use the apple-dev skill. They should be consulted about any iOS/macOS and other Apple OS decisions.
 
 Teammate "ai-builder" should use the ai-dev skill. They should be consulted about any AI decisions.
 

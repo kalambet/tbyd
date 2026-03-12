@@ -263,6 +263,31 @@ func runServer() error {
 	}()
 	slog.Info("MCP server started (stdio transport)")
 
+	// Start HTTP/SSE MCP transport on the configured MCP port.
+	mcpHTTPHandler := api.NewMCPHTTPHandler(mcpSrv, apiToken)
+	mcpHTTPAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Server.MCPPort)
+	mcpHTTPSrv := &http.Server{
+		Addr:              mcpHTTPAddr,
+		Handler:           mcpHTTPHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		fmt.Fprintf(os.Stderr, "MCP HTTP server listening on %s\n", mcpHTTPAddr)
+		if err := mcpHTTPSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("MCP HTTP server error", "error", err)
+		}
+	}()
+	slog.Info("MCP HTTP server started", "port", cfg.Server.MCPPort)
+
+	// Print setup snippet on first start only (sentinel file prevents repeat output).
+	sentinelPath := filepath.Join(cfg.Storage.DataDir, ".mcp_setup_shown")
+	if _, err := os.Stat(sentinelPath); os.IsNotExist(err) {
+		api.PrintMCPSetupSnippet(os.Stderr, cfg.Server.MCPPort, apiToken)
+		if f, err := os.Create(sentinelPath); err == nil {
+			f.Close()
+		}
+	}
+
 	// Start server in a goroutine.
 	errCh := make(chan error, 1)
 	go func() {
@@ -286,6 +311,9 @@ func runServer() error {
 	// Graceful shutdown with timeout.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := mcpHTTPSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("MCP HTTP server shutdown error", "error", err)
+	}
 	return srv.Shutdown(shutdownCtx)
 }
 
