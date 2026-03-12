@@ -1,0 +1,1 @@
+ALTER TABLE context_docs ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';

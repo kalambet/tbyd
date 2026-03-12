@@ -42,4 +42,5 @@ type ContextDoc struct {
 	Tags      string // JSON array stored as text
 	CreatedAt time.Time
 	VectorID  string
+	Metadata  string // JSON object stored as text
 }
