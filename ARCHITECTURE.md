@@ -916,8 +916,8 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **2.2** MCP server (`add_context`, `recall`, `set_preference`, `summarize_session`)
 - [x] **2.3** CLI interface (`tbyd ingest`, `tbyd status`, `tbyd profile`, `tbyd recall`)
 - [x] **2.4** Interaction storage (opt-in)
-- [ ] **2.5** macOS SwiftUI menubar app
-- [ ] **2.6** macOS Share Extension (Mail, Finder, Safari, any app)
+- [x] **2.5** macOS SwiftUI menubar app
+- [x] **2.6** macOS Share Extension (Mail, Finder, Safari, any app)
 
 ### Phase 3 — Personalization
 - [ ] **3.1** Feedback collection API and UI

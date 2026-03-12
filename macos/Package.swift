@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "tbyd-menubar", targets: ["TBYDApp"]),
+        .library(name: "ShareExtension", targets: ["ShareExtension"]),
     ],
     targets: [
         .executableTarget(
@@ -18,10 +19,21 @@ let package = Package(
             name: "TBYDKit",
             path: "Sources/TBYDKit"
         ),
+        .target(
+            name: "ShareExtension",
+            path: "Sources/ShareExtension",
+            exclude: ["ShareExtensionInfo.plist"]
+        ),
         .testTarget(
             name: "TBYDTests",
             dependencies: ["TBYDKit"],
-            path: "Tests"
+            path: "Tests",
+            exclude: ["ShareExtensionTests"]
+        ),
+        .testTarget(
+            name: "ShareExtensionTests",
+            dependencies: ["ShareExtension"],
+            path: "Tests/ShareExtensionTests"
         ),
     ]
 )

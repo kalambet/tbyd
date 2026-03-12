@@ -276,6 +276,114 @@
 
 ---
 
+## Issue 2.7 — File MIME detection and content extraction
+
+**Context:** The `POST /ingest` handler accepts `type: "file"` payloads with base64-encoded content, but currently casts the decoded bytes directly to a string. Binary formats (PDF, images) produce garbage text that corrupts the vector store and degrades retrieval quality.
+
+**Tasks:**
+- In `internal/api/ingest.go`, after base64-decoding the file payload:
+  - Detect MIME type using `http.DetectContentType(decoded[:512])`
+  - Route by MIME type:
+    - `application/pdf` — extract plain text using a PDF-to-text library (e.g., `github.com/ledongthuc/pdf` or `pdfcpu`)
+    - `text/plain`, `text/markdown`, `text/html` — store decoded bytes directly as UTF-8 string (strip HTML tags for `text/html`)
+    - Unsupported MIME types — return `400` with message `"unsupported file type: <mime>"`
+  - Store the extracted text (not raw bytes) in `context_docs.content`
+  - Store the detected MIME type in `context_docs` metadata (extend `IngestRequest.Metadata` if needed)
+- Add unit tests to `internal/api/ingest_test.go`:
+  - `TestIngest_FilePDF` — POST base64-encoded minimal PDF; verify extracted text stored (not raw bytes)
+  - `TestIngest_FileMarkdown` — POST base64-encoded markdown; verify content stored as-is
+  - `TestIngest_FileUnsupportedMIME` — POST base64-encoded binary (e.g., PNG without image handling); verify 400 returned
+
+**Acceptance criteria:**
+- `tbyd ingest --file report.pdf` results in readable extracted text appearing in `tbyd recall`
+- `tbyd ingest --file notes.md` stores the markdown content verbatim
+- Ingesting an unsupported binary returns a clear error, not silent garbage
+
+---
+
+## Issue 2.8 — MCP HTTP/SSE transport and config snippet
+
+**Context:** The MCP server currently only starts a stdio transport (suitable for `claude mcp add` via CLI). Claude Desktop and other HTTP-based MCP clients need an HTTP/SSE transport on port 4001. Additionally, there is no auto-generated config snippet to guide users through the initial setup.
+
+**Tasks:**
+- In `internal/api/mcp.go`:
+  - Start an HTTP/SSE MCP transport on the configured port (default 4001) in addition to stdio
+  - HTTP transport requires `Authorization: Bearer <token>` header (same token as the REST API)
+  - Both transports register the same tools and resources; share the handler implementation
+- On first server start (or when `tbyd status` is run and MCP is not yet configured), print a setup snippet:
+  ```
+  Add tbyd to Claude Code:
+    claude mcp add tbyd --transport http --url http://localhost:4001
+
+  Or add to ~/.claude/settings.json:
+    { "mcpServers": { "tbyd": { "url": "http://localhost:4001", "headers": { "Authorization": "Bearer <token>" } } } }
+  ```
+  Token value should be read from Keychain and substituted in the printed snippet.
+- Add unit tests to `internal/api/mcp_test.go`:
+  - `TestMCPHTTP_AddContext` — start HTTP transport; POST tool call via HTTP with valid bearer token; verify doc stored
+  - `TestMCPHTTP_Unauthorized` — POST tool call without token; verify 401
+  - `TestMCPHTTP_ConcurrentCalls` — 10 concurrent HTTP tool calls; verify no panics, all respond
+
+**Acceptance criteria:**
+- `claude mcp add tbyd --transport http --url http://localhost:4001` makes tools available in Claude Code
+- HTTP requests without bearer token return 401
+- Stdio transport continues to work alongside HTTP transport
+- First-run snippet is printed with the actual token substituted
+
+---
+
+## Issue 2.9 — Interaction storage onboarding prompt
+
+**Context:** The `save_interactions` flag defaults to `false` and users may never discover it. The spec requires a one-time onboarding prompt on the first request so users can make an informed choice about local interaction storage.
+
+**Tasks:**
+- Track whether the onboarding prompt has been shown in the config (e.g., `[storage] onboarding_shown = false`)
+- In the OpenAI-compatible request handler (`internal/api/openai.go`), before processing the first request after server start:
+  - If `save_interactions` has never been explicitly set and `onboarding_shown = false`:
+    - Print/log the onboarding message to stderr (visible in `tbyd start` foreground output) and to the MCP response metadata if applicable:
+      ```
+      tbyd can store your interactions locally for improved context retrieval.
+      This data never leaves your machine. Enable with: tbyd config set storage.save_interactions true
+      ```
+    - Set `onboarding_shown = true` in config so the prompt is shown only once
+- Add unit test to `internal/api/interactions_test.go`:
+  - `TestOnboardingPrompt_ShownOnce` — send two requests with `onboarding_shown=false`; verify prompt emitted exactly once
+  - `TestOnboardingPrompt_NotShownWhenConfigured` — send request with `save_interactions` explicitly set; verify no prompt emitted
+
+**Acceptance criteria:**
+- On the first ever request, the onboarding message appears in server output
+- After `tbyd config set storage.save_interactions true/false`, the prompt never appears again
+- Prompt is shown at most once across server restarts
+
+---
+
+## Issue 2.10 — Menubar app: PreferencesViewModelTests and StatusView
+
+**Context:** Two spec deliverables are missing from the macOS menubar app: the `PreferencesViewModelTests` test suite (the only required test file not yet written) and a dedicated `StatusView.swift` component (the status polling logic is present in `StatusPoller`+`AppState` but not as a named view file).
+
+**Tasks:**
+- Create `macos/Tests/PreferencesViewModelTests.swift`:
+  - `testSaveAPIKey` — call `save()` with a key value; mock `KeychainService`; verify key written to Keychain
+  - `testLoadAPIKey` — pre-populate mock Keychain; init view model; verify `apiKey` field populated
+  - `testSetSaveInteractions` — toggle `saveInteractions`; mock API client; verify `PATCH /profile` sent with correct field
+  - `testSetAutoStart` — toggle `autoStart`; mock `LaunchAgentManager`; verify plist installed/removed
+- Create `macos/Sources/App/StatusView.swift`:
+  - A SwiftUI `View` that displays the current server status with the icon and label
+  - Reads from `AppState` (already `@Observable`)
+  - Extracted from the inline label closure in `TBYDApp.swift`/`MenuBarContentView.swift`
+  - No new logic needed — purely a named extraction of existing UI code
+
+**Unit tests:**
+- The four `PreferencesViewModelTests` tests listed above
+- Existing `StatusPollerTests` already cover the polling behaviour; `StatusView` itself needs no additional tests
+
+**Acceptance criteria:**
+- `swift test` passes with `PreferencesViewModelTests` included
+- `StatusView.swift` exists and is used by `TBYDApp` or `MenuBarContentView`
+- Saving an API key in `PreferencesView` is covered by an automated test
+
+---
+
 ## Phase 2 Verification
 
 1. Open Claude Code, run `tbyd recall "what are my Go preferences"` via MCP → verify relevant stored docs returned
