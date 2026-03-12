@@ -313,10 +313,14 @@ func runServer() error {
 	// Graceful shutdown with timeout.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := mcpHTTPSrv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("MCP HTTP server shutdown error", "error", err)
+	mcpShutdownErr := mcpHTTPSrv.Shutdown(shutdownCtx)
+	if mcpShutdownErr != nil {
+		slog.Error("MCP HTTP server shutdown error", "error", mcpShutdownErr)
 	}
-	return srv.Shutdown(shutdownCtx)
+	if srvShutdownErr := srv.Shutdown(shutdownCtx); srvShutdownErr != nil {
+		return srvShutdownErr
+	}
+	return mcpShutdownErr
 }
 
 func stopServer() error {

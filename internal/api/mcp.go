@@ -178,9 +178,9 @@ func mcpBearerAuth(token string, next http.Handler) http.Handler {
 func PrintMCPSetupSnippet(w io.Writer, mcpPort int, token string) {
 	tokenJSON, _ := json.Marshal(token) // never errors for a string value
 	fmt.Fprintf(w, "\nAdd tbyd to Claude Code:\n")
-	fmt.Fprintf(w, "  claude mcp add tbyd --transport http --url http://127.0.0.1:%d\n\n", mcpPort)
+	fmt.Fprintf(w, "  claude mcp add tbyd --transport http --url http://localhost:%d\n\n", mcpPort)
 	fmt.Fprintf(w, "Or add to ~/.claude/settings.json:\n")
-	fmt.Fprintf(w, "  { \"mcpServers\": { \"tbyd\": { \"url\": \"http://127.0.0.1:%d\", \"headers\": { \"Authorization\": \"Bearer %s\" } } } }\n\n", mcpPort, string(tokenJSON[1:len(tokenJSON)-1]))
+	fmt.Fprintf(w, "  { \"mcpServers\": { \"tbyd\": { \"url\": \"http://localhost:%d\", \"headers\": { \"Authorization\": \"Bearer %s\" } } } }\n\n", mcpPort, string(tokenJSON[1:len(tokenJSON)-1]))
 }
 
 func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {
