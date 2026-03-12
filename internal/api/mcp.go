@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -134,6 +138,49 @@ func NewMCPServer(deps MCPDeps) *server.MCPServer {
 	)
 
 	return s
+}
+
+// NewMCPHTTPHandler returns an http.Handler that serves the MCP streamable HTTP
+// transport with bearer token authentication on top of the given MCPServer.
+// Both the HTTP transport and the stdio transport share the same MCPServer
+// (and therefore the same registered tools and resources).
+func NewMCPHTTPHandler(mcpSrv *server.MCPServer, token string) http.Handler {
+	transport := server.NewStreamableHTTPServer(mcpSrv)
+	return mcpBearerAuth(token, transport)
+}
+
+// mcpBearerAuth wraps next with Authorization: Bearer <token> enforcement.
+// Panics at construction time if token is empty to prevent a misconfigured
+// server from accepting any request.
+func mcpBearerAuth(token string, next http.Handler) http.Handler {
+	if token == "" {
+		panic("mcpBearerAuth: token must not be empty")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only accept the "Bearer " scheme; anything else (including a bare token
+		// without the prefix) is rejected before comparison.
+		authHeader := r.Header.Get("Authorization")
+		var provided string
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			provided = authHeader[len("Bearer "):]
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			http.Error(w, `{"error":{"message":"unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// PrintMCPSetupSnippet writes MCP setup instructions to w with the actual
+// bearer token substituted into the configuration examples.
+// The token is JSON-encoded to guarantee valid output regardless of token content.
+func PrintMCPSetupSnippet(w io.Writer, mcpPort int, token string) {
+	tokenJSON, _ := json.Marshal(token) // never errors for a string value
+	fmt.Fprintf(w, "\nAdd tbyd to Claude Code:\n")
+	fmt.Fprintf(w, "  claude mcp add tbyd --transport http --url http://localhost:%d\n\n", mcpPort)
+	fmt.Fprintf(w, "Or add to ~/.claude/settings.json:\n")
+	fmt.Fprintf(w, "  { \"mcpServers\": { \"tbyd\": { \"url\": \"http://localhost:%d\", \"headers\": { \"Authorization\": \"Bearer %s\" } } } }\n\n", mcpPort, string(tokenJSON[1:len(tokenJSON)-1]))
 }
 
 func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {

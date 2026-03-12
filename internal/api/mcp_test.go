@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/kalambet/tbyd/internal/profile"
@@ -471,5 +476,207 @@ func TestMCPResource_Recent(t *testing.T) {
 	}
 	if len(summaries) != 1 {
 		t.Fatalf("expected 1 interaction, got %d", len(summaries))
+	}
+}
+
+func TestPrintMCPSetupSnippet(t *testing.T) {
+	const token = "my-secret-token"
+	const port = 4001
+	var buf strings.Builder
+	PrintMCPSetupSnippet(&buf, port, token)
+	out := buf.String()
+
+	if !strings.Contains(out, "4001") {
+		t.Errorf("expected port 4001 in snippet, got: %s", out)
+	}
+	if !strings.Contains(out, token) {
+		t.Errorf("expected token %q in snippet, got: %s", token, out)
+	}
+	if !strings.Contains(out, "claude mcp add tbyd") {
+		t.Errorf("expected claude mcp add command in snippet, got: %s", out)
+	}
+	if !strings.Contains(out, "Authorization") {
+		t.Errorf("expected Authorization header in settings.json snippet, got: %s", out)
+	}
+}
+
+func TestPrintMCPSetupSnippet_SpecialCharsInToken(t *testing.T) {
+	// Tokens with JSON-special characters must produce valid embedded JSON.
+	const token = `tok"en\with"specials`
+	const port = 4001
+	var buf strings.Builder
+	PrintMCPSetupSnippet(&buf, port, token)
+	out := buf.String()
+
+	// The raw token must not appear unescaped in the output.
+	if strings.Contains(out, `tok"en`) {
+		t.Errorf("token was not JSON-escaped in snippet: %s", out)
+	}
+}
+
+// newTestMCPHTTPServer creates an httptest.Server backed by NewMCPHTTPHandler.
+func newTestMCPHTTPServer(t *testing.T, token string) (*httptest.Server, *storage.Store) {
+	t.Helper()
+	deps, store := newTestMCPDeps(t)
+	mcpSrv := NewMCPServer(deps)
+	ts := httptest.NewServer(NewMCPHTTPHandler(mcpSrv, token))
+	t.Cleanup(ts.Close)
+	return ts, store
+}
+
+// newMCPClient creates an authenticated MCP client for the given test server URL.
+func newMCPClient(t *testing.T, serverURL, token string) *mcpclient.Client {
+	t.Helper()
+	c, err := mcpclient.NewStreamableHttpClient(serverURL,
+		transport.WithHTTPHeaders(map[string]string{
+			"Authorization": "Bearer " + token,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("creating MCP client: %v", err)
+	}
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatalf("starting MCP client: %v", err)
+	}
+	initReq := mcp.InitializeRequest{
+		Params: mcp.InitializeParams{
+			ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+			ClientInfo:      mcp.Implementation{Name: "test-client", Version: "1.0.0"},
+		},
+	}
+	if _, err := c.Initialize(ctx, initReq); err != nil {
+		t.Fatalf("initializing MCP client: %v", err)
+	}
+	return c
+}
+
+func TestMCPHTTP_AddContext(t *testing.T) {
+	const token = "test-http-token"
+	ts, store := newTestMCPHTTPServer(t, token)
+
+	c := newMCPClient(t, ts.URL, token)
+
+	callReq := mcp.CallToolRequest{}
+	callReq.Params.Name = "add_context"
+	callReq.Params.Arguments = map[string]interface{}{
+		"content": "HTTP transport test content",
+		"title":   "HTTP test",
+	}
+
+	result, err := c.CallTool(context.Background(), callReq)
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("tool returned error: %+v", result)
+	}
+
+	docs, err := store.ListContextDocsPaginated(10, 0)
+	if err != nil {
+		t.Fatalf("listing docs: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 doc, got %d", len(docs))
+	}
+	if docs[0].Content != "HTTP transport test content" {
+		t.Fatalf("unexpected content: %s", docs[0].Content)
+	}
+}
+
+func TestMCPHTTP_Unauthorized(t *testing.T) {
+	const token = "correct-token"
+	ts, _ := newTestMCPHTTPServer(t, token)
+
+	body := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
+
+	// No Authorization header — expect 401.
+	resp, err := http.Post(ts.URL+"/mcp", "application/json", body)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with no auth, got %d", resp.StatusCode)
+	}
+
+	// Wrong token — expect 401.
+	req, _ := http.NewRequest("POST", ts.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`))
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request with wrong token failed: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", resp2.StatusCode)
+	}
+}
+
+func TestMCPHTTP_ConcurrentCalls(t *testing.T) {
+	const token = "concurrent-token"
+	ts, _ := newTestMCPHTTPServer(t, token)
+
+	var wg sync.WaitGroup
+	var successCount atomic.Int32
+	errs := make(chan error, 10)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			c, err := mcpclient.NewStreamableHttpClient(ts.URL,
+				transport.WithHTTPHeaders(map[string]string{
+					"Authorization": "Bearer " + token,
+				}),
+			)
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d: creating client: %v", i, err)
+				return
+			}
+			ctx := context.Background()
+			if err := c.Start(ctx); err != nil {
+				errs <- fmt.Errorf("goroutine %d: start: %v", i, err)
+				return
+			}
+			initReq := mcp.InitializeRequest{
+				Params: mcp.InitializeParams{
+					ProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+					ClientInfo:      mcp.Implementation{Name: "test", Version: "1.0"},
+				},
+			}
+			if _, err := c.Initialize(ctx, initReq); err != nil {
+				errs <- fmt.Errorf("goroutine %d: initialize: %v", i, err)
+				return
+			}
+
+			callReq := mcp.CallToolRequest{}
+			callReq.Params.Name = "add_context"
+			callReq.Params.Arguments = map[string]interface{}{
+				"content": fmt.Sprintf("concurrent content %d", i),
+			}
+			result, err := c.CallTool(ctx, callReq)
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d: CallTool: %v", i, err)
+				return
+			}
+			if result.IsError {
+				errs <- fmt.Errorf("goroutine %d: tool error", i)
+				return
+			}
+			successCount.Add(1)
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent call failed: %v", err)
+	}
+	if got := successCount.Load(); got != 10 {
+		t.Fatalf("expected 10 successful calls, got %d", got)
 	}
 }
