@@ -294,11 +294,15 @@ func (s *Store) GetAllProfileKeys() (map[string]string, error) {
 // --- Context Docs ---
 
 func (s *Store) SaveContextDoc(doc ContextDoc) error {
+	metadata := doc.Metadata
+	if metadata == "" {
+		metadata = "{}"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO context_docs (id, title, content, source, tags, created_at, vector_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO context_docs (id, title, content, source, tags, created_at, vector_id, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		doc.ID, doc.Title, doc.Content, doc.Source, doc.Tags,
-		doc.CreatedAt.UTC().Format(time.RFC3339), doc.VectorID,
+		doc.CreatedAt.UTC().Format(time.RFC3339), doc.VectorID, metadata,
 	)
 	return err
 }
@@ -307,9 +311,9 @@ func (s *Store) GetContextDoc(id string) (ContextDoc, error) {
 	var d ContextDoc
 	var createdAt string
 	err := s.db.QueryRow(`
-		SELECT id, title, content, source, tags, created_at, vector_id
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata
 		FROM context_docs WHERE id = ?`, id,
-	).Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID)
+	).Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata)
 	if err == sql.ErrNoRows {
 		return ContextDoc{}, ErrNotFound
 	}
@@ -326,7 +330,7 @@ func (s *Store) GetContextDoc(id string) (ContextDoc, error) {
 
 func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, content, source, tags, created_at, vector_id
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata
 		FROM context_docs ORDER BY created_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -338,7 +342,7 @@ func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 	for rows.Next() {
 		var d ContextDoc
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)
@@ -384,7 +388,7 @@ func (s *Store) ClaimNextJob(types []string) (*Job, error) {
 		ORDER BY run_after ASC, created_at ASC
 		LIMIT 1`
 
-	args := make([]interface{}, 0, len(types)+1)
+	args := make([]any, 0, len(types)+1)
 	args = append(args, now)
 	for _, t := range types {
 		args = append(args, t)
@@ -557,7 +561,7 @@ func (s *Store) ListInteractions(limit, offset int) ([]Interaction, error) {
 
 func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, content, source, tags, created_at, vector_id
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata
 		FROM context_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset,
 	)
 	if err != nil {
@@ -569,7 +573,7 @@ func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error
 	for rows.Next() {
 		var d ContextDoc
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)

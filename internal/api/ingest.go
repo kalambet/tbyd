@@ -130,7 +130,20 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 				httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid base64 content")
 				return
 			}
-			resolvedContent = string(decoded)
+			meta := req.Metadata
+			if meta == nil {
+				meta = map[string]string{}
+			}
+			text, detectedMIME, err := extractFileContent(decoded, meta)
+			if err != nil {
+				httpError(w, http.StatusBadRequest, "invalid_request_error", "%v", err)
+				return
+			}
+			resolvedContent = text
+			if req.Metadata == nil {
+				req.Metadata = map[string]string{}
+			}
+			req.Metadata["mime_type"] = detectedMIME
 
 		default:
 			resolvedContent = req.Content
@@ -148,6 +161,16 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 			tagsJSON = string(b)
 		}
 
+		metadataJSON := "{}"
+		if req.Metadata != nil {
+			b, err := json.Marshal(req.Metadata)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "api_error", "failed to marshal metadata: %v", err)
+				return
+			}
+			metadataJSON = string(b)
+		}
+
 		doc := storage.ContextDoc{
 			ID:        docID,
 			Title:     req.Title,
@@ -155,6 +178,7 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 			Source:    req.Source,
 			Tags:      tagsJSON,
 			CreatedAt: time.Now().UTC(),
+			Metadata:  metadataJSON,
 		}
 		if err := deps.Store.SaveContextDoc(doc); err != nil {
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to save document: %v", err)

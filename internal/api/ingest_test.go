@@ -18,6 +18,9 @@ import (
 
 const testToken = "test-token-12345"
 
+// testPDFB64 is a minimal valid PDF containing the text "Hello PDF".
+var testPDFB64 = "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlIC9DYXRhbG9nIC9QYWdlcyAyIDAgUj4+CmVuZG9iagoyIDAgb2JqCjw8L1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDQgMCBSIC9SZXNvdXJjZXMgPDwvRm9udCA8PC9GMSA1IDAgUj4+Pj4+PgplbmRvYmoKNCAwIG9iago8PC9MZW5ndGggNDE+PgpzdHJlYW0KQlQgL0YxIDEyIFRmIDEwMCA3MDAgVGQgKEhlbGxvIFBERikgVGogRVQKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8L1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhPj4KZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU2IDAwMDAwIG4gCjAwMDAwMDAxMTEgMDAwMDAgbiAKMDAwMDAwMDIzMSAwMDAwMCBuIAowMDAwMDAwMzIwIDAwMDAwIG4gCnRyYWlsZXIKPDwvU2l6ZSA2IC9Sb290IDEgMCBSPj4Kc3RhcnR4cmVmCjM4OAolJUVPRgo="
+
 func setupAppHandler(t *testing.T, token string) (http.Handler, *storage.Store) {
 	t.Helper()
 	store, err := storage.Open(":memory:")
@@ -366,6 +369,104 @@ func TestDeleteContextDoc_NotFound(t *testing.T) {
 	}
 }
 
+// TestExtractTextFromPDF validates PDF text extraction at the function level.
+func TestExtractTextFromPDF(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString(testPDFB64)
+	if err != nil {
+		t.Fatalf("decode test PDF: %v", err)
+	}
+
+	text, err := extractTextFromPDF(data)
+	if err != nil {
+		t.Fatalf("extractTextFromPDF: %v", err)
+	}
+	if !strings.Contains(text, "Hello PDF") {
+		t.Errorf("extracted text %q does not contain %q", text, "Hello PDF")
+	}
+}
+
+func TestIngest_FilePDF(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	body := fmt.Sprintf(`{"source":"cli","type":"file","content":"%s","metadata":{"filename":"doc.pdf"}}`, testPDFB64)
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/ingest", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+
+	doc, err := store.GetContextDoc(resp["id"])
+	if err != nil {
+		t.Fatalf("GetContextDoc: %v", err)
+	}
+
+	// Content should be extracted text, not the raw PDF bytes.
+	if !strings.Contains(doc.Content, "Hello PDF") {
+		t.Errorf("doc.Content = %q, want it to contain %q", doc.Content, "Hello PDF")
+	}
+	if strings.HasPrefix(doc.Content, "%PDF") {
+		t.Errorf("doc.Content appears to be raw PDF bytes, not extracted text")
+	}
+	if !strings.Contains(doc.Metadata, "application/pdf") {
+		t.Errorf("doc.Metadata = %q, want it to contain %q", doc.Metadata, "application/pdf")
+	}
+}
+
+func TestIngest_FileMarkdown(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	mdContent := "# Hello\n\nThis is **markdown** content."
+	encoded := base64.StdEncoding.EncodeToString([]byte(mdContent))
+	body := fmt.Sprintf(`{"source":"cli","type":"file","content":"%s","metadata":{"filename":"notes.md"}}`, encoded)
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/ingest", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+
+	doc, err := store.GetContextDoc(resp["id"])
+	if err != nil {
+		t.Fatalf("GetContextDoc: %v", err)
+	}
+	if doc.Content != mdContent {
+		t.Errorf("doc.Content = %q, want %q", doc.Content, mdContent)
+	}
+}
+
+func TestIngest_FileUnsupportedMIME(t *testing.T) {
+	h, _ := setupAppHandler(t, testToken)
+
+	// Minimal 1x1 PNG.
+	const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+
+	body := fmt.Sprintf(`{"source":"cli","type":"file","content":"%s","metadata":{"filename":"image.png"}}`, pngB64)
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/ingest", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+
+	var errResp map[string]interface{}
+	json.NewDecoder(rr.Body).Decode(&errResp)
+	errObj, _ := errResp["error"].(map[string]interface{})
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "unsupported file type") {
+		t.Errorf("error message = %q, want it to contain %q", msg, "unsupported file type")
+	}
+}
+
 func TestListContextDocs_Paginated(t *testing.T) {
 	h, store := setupAppHandler(t, testToken)
 
@@ -395,5 +496,37 @@ func TestListContextDocs_Paginated(t *testing.T) {
 	json.NewDecoder(rr.Body).Decode(&docs)
 	if len(docs) != 2 {
 		t.Fatalf("got %d docs, want 2", len(docs))
+	}
+}
+
+func TestIngest_FileHTML(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	htmlContent := `<html><body><p>visible</p><script>hidden js</script><style>.hidden{}</style></body></html>`
+	encoded := base64.StdEncoding.EncodeToString([]byte(htmlContent))
+	body := fmt.Sprintf(`{"source":"cli","type":"file","content":"%s","metadata":{"filename":"page.html"}}`, encoded)
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/ingest", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+
+	doc, err := store.GetContextDoc(resp["id"])
+	if err != nil {
+		t.Fatalf("GetContextDoc: %v", err)
+	}
+	if !strings.Contains(doc.Content, "visible") {
+		t.Errorf("doc.Content = %q, want it to contain %q", doc.Content, "visible")
+	}
+	if strings.Contains(doc.Content, "hidden js") {
+		t.Errorf("doc.Content = %q, must NOT contain script content %q", doc.Content, "hidden js")
+	}
+	if strings.Contains(doc.Content, ".hidden") {
+		t.Errorf("doc.Content = %q, must NOT contain style content %q", doc.Content, ".hidden")
 	}
 }
