@@ -38,8 +38,8 @@ func NewOnboardingNotifier(cfg OnboardingConfig) *OnboardingNotifier {
 
 // Notify prints the onboarding message to w if the conditions are met.
 // It is safe to call from multiple goroutines; the check-and-print is
-// performed at most once per process lifetime. Errors writing to w or
-// persisting the flag are silently ignored so they never block a request.
+// performed at most once per process lifetime. Errors writing to w never
+// block a request; errors persisting the flag are logged as warnings.
 func (n *OnboardingNotifier) Notify(w io.Writer) {
 	if n == nil || n.cfg == nil {
 		return
@@ -58,7 +58,9 @@ func (n *OnboardingNotifier) Notify(w io.Writer) {
 			return
 		}
 		fmt.Fprint(w, onboardingMessage)
-		// Best-effort: persist the flag. Ignore errors.
-		_ = n.cfg.MarkOnboardingShown()
+		// Best-effort: persist the flag so the prompt is not repeated on restart.
+		if err := n.cfg.MarkOnboardingShown(); err != nil {
+			slog.Warn("onboarding: failed to mark prompt as shown; it may appear again on next start", "error", err)
+		}
 	})
 }
