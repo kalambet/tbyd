@@ -71,7 +71,7 @@ func TestSaveInteraction_OptInEnabled(t *testing.T) {
 	t.Cleanup(cancel)
 
 	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
-	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true, nil)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi there"}]}`
 	rr := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestSaveInteraction_OptInDisabled(t *testing.T) {
 	})
 
 	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
-	h := NewOpenAIHandler(context.Background(), c, nil, saver, false, false) // disabled
+	h := NewOpenAIHandler(context.Background(), c, nil, saver, false, false, nil) // disabled
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -171,7 +171,7 @@ func TestSaveInteraction_NilSaver(t *testing.T) {
 		fmt.Fprint(w, respJSON)
 	})
 
-	h := NewOpenAIHandler(context.Background(), c, nil, nil, true, false) // enabled but no saver
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, true, false, nil) // enabled but no saver
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -199,7 +199,7 @@ func TestSaveInteraction_Streaming(t *testing.T) {
 	t.Cleanup(cancel)
 
 	saver := &mockInteractionSaver{saveDone: make(chan struct{}, 1)}
-	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true, nil)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"stream me"}],"stream":true}`
 	rr := httptest.NewRecorder()
@@ -262,7 +262,7 @@ func TestSaveInteraction_ErrorDoesNotBlockResponse(t *testing.T) {
 			return fmt.Errorf("database error")
 		},
 	}
-	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true, nil)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -341,7 +341,7 @@ func TestSaveInteraction_QueuedImmediately(t *testing.T) {
 			return nil
 		},
 	}
-	h := NewOpenAIHandler(ctx, c, nil, saver, true, true)
+	h := NewOpenAIHandler(ctx, c, nil, saver, true, true, nil)
 
 	body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
 	rr := httptest.NewRecorder()
@@ -367,4 +367,121 @@ func TestSaveInteraction_QueuedImmediately(t *testing.T) {
 
 	// Unblock the saver.
 	close(saveCh)
+}
+
+// mockOnboardingConfig implements OnboardingConfig for tests.
+type mockOnboardingConfig struct {
+	saveInteractionsSet bool
+	onboardingShown     bool
+	markShownCalled     int
+}
+
+func (m *mockOnboardingConfig) SaveInteractionsExplicitlySet() (bool, error) {
+	return m.saveInteractionsSet, nil
+}
+
+func (m *mockOnboardingConfig) OnboardingShown() bool {
+	return m.onboardingShown
+}
+
+func (m *mockOnboardingConfig) MarkOnboardingShown() error {
+	m.markShownCalled++
+	return nil
+}
+
+// TestOnboardingPrompt_ShownOnce verifies that when onboarding_shown=false and
+// save_interactions has never been explicitly set, the prompt is printed exactly
+// once even across multiple requests.
+func TestOnboardingPrompt_ShownOnce(t *testing.T) {
+	respJSON := `{"id":"gen-1","choices":[{"message":{"role":"assistant","content":"Hello!"}}]}`
+
+	_, c := mockUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, respJSON)
+	})
+
+	cfg := &mockOnboardingConfig{
+		saveInteractionsSet: false,
+		onboardingShown:     false,
+	}
+	notifier := NewOnboardingNotifier(cfg)
+
+	var buf strings.Builder
+	// Override Notify target by wrapping: the notifier uses os.Stderr normally,
+	// but in tests we call Notify directly to capture output.
+	//
+	// We test via the notifier directly (not through the handler) to avoid
+	// needing os.Stderr capture, which is fragile. The handler wires os.Stderr;
+	// the unit under test is OnboardingNotifier.Notify.
+	notifier.Notify(&buf)
+	notifier.Notify(&buf) // second call — must be a no-op
+
+	got := buf.String()
+	if got != onboardingMessage {
+		t.Errorf("output = %q, want %q", got, onboardingMessage)
+	}
+
+	if cfg.markShownCalled != 1 {
+		t.Errorf("MarkOnboardingShown called %d times, want 1", cfg.markShownCalled)
+	}
+
+	// Also verify the handler passes the notifier correctly by sending two requests.
+	h := NewOpenAIHandler(context.Background(), c, nil, nil, false, false, notifier)
+	for i := 0; i < 2; i++ {
+		body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want %d", i+1, rr.Code, http.StatusOK)
+		}
+	}
+
+	// sync.Once ensures the notifier fired at most once regardless of handler calls.
+	if cfg.markShownCalled != 1 {
+		t.Errorf("after handler requests: MarkOnboardingShown called %d times, want 1", cfg.markShownCalled)
+	}
+}
+
+// TestOnboardingPrompt_SuppressedAfterRestart verifies that a fresh
+// OnboardingNotifier (simulating a server restart) does not print the prompt
+// when onboarding_shown was already persisted as true in a prior run.
+func TestOnboardingPrompt_SuppressedAfterRestart(t *testing.T) {
+	cfg := &mockOnboardingConfig{
+		saveInteractionsSet: false,
+		onboardingShown:     true, // persisted from a prior run
+	}
+	notifier := NewOnboardingNotifier(cfg)
+
+	var buf strings.Builder
+	notifier.Notify(&buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want empty (onboarding already shown in prior run)", buf.String())
+	}
+	if cfg.markShownCalled != 0 {
+		t.Errorf("MarkOnboardingShown called %d times, want 0", cfg.markShownCalled)
+	}
+}
+
+// TestOnboardingPrompt_NotShownWhenConfigured verifies that when
+// save_interactions has been explicitly set, the onboarding prompt is never
+// printed.
+func TestOnboardingPrompt_NotShownWhenConfigured(t *testing.T) {
+	cfg := &mockOnboardingConfig{
+		saveInteractionsSet: true, // explicitly configured
+		onboardingShown:     false,
+	}
+	notifier := NewOnboardingNotifier(cfg)
+
+	var buf strings.Builder
+	notifier.Notify(&buf)
+
+	if buf.Len() != 0 {
+		t.Errorf("output = %q, want empty (save_interactions is configured)", buf.String())
+	}
+
+	if cfg.markShownCalled != 0 {
+		t.Errorf("MarkOnboardingShown called %d times, want 0", cfg.markShownCalled)
+	}
 }

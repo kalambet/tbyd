@@ -48,10 +48,29 @@ func SetKey(key, value string) error {
 				return fmt.Errorf("invalid integer value for %s: %w", key, err)
 			}
 			return b.SetInt(key, i)
+		case kBool:
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("invalid boolean value for %s: %w", key, err)
+			}
+			return b.SetString(key, value)
 		}
 	}
 
 	return fmt.Errorf("unknown config key: %q", key)
+}
+
+// IsKeySet reports whether the given key has been explicitly stored in the
+// platform backend (ignoring environment variable overrides and defaults).
+// It uses GetString for all key types because SetKey stores kBool values via
+// SetString (see the kBool case above). If SetKey ever switches to a typed
+// setter for booleans, this function must be updated in tandem.
+func IsKeySet(key string) (bool, error) {
+	b := newPlatformBackend()
+	_, ok, err := b.GetString(key)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 // ValidKeys returns the list of valid non-secret config key names.

@@ -66,6 +66,11 @@ var specs = []keySpec{
 		extract: func(cfg Config) any { return cfg.Storage.SaveInteractions },
 	},
 	{
+		key: "storage.onboarding_shown", typ: kBool, env: "TBYD_STORAGE_ONBOARDING_SHOWN",
+		apply:   func(cfg *Config, v any) { cfg.Storage.OnboardingShown = v.(bool) },
+		extract: func(cfg Config) any { return cfg.Storage.OnboardingShown },
+	},
+	{
 		key: "proxy.openrouter_api_key", typ: kString, env: "TBYD_OPENROUTER_API_KEY",
 		secret: true,
 		apply:   func(cfg *Config, v any) { cfg.Proxy.OpenRouterAPIKey = v.(string) },

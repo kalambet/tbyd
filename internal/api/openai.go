@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -75,7 +76,9 @@ func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan 
 // appCtx controls the lifetime of the background save goroutine and must
 // outlive the server's request-handling lifetime. Pass context.Background()
 // in tests or when save is disabled.
-func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool) http.Handler {
+//
+// onboarding is optional; pass nil to disable the onboarding prompt.
+func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool, onboarding *OnboardingNotifier) http.Handler {
 	r := chi.NewRouter()
 
 	// Start a bounded save channel and single consumer goroutine.
@@ -88,7 +91,7 @@ func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipelin
 
 	r.Get("/health", handleHealth(&droppedInteractions))
 	r.Get("/v1/models", handleModels(p))
-	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh, &droppedInteractions))
+	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh, &droppedInteractions, onboarding))
 
 	return r
 }
@@ -119,8 +122,10 @@ func handleModels(p *proxy.Client) http.HandlerFunc {
 	}
 }
 
-func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh chan<- interactionRecord, droppedInteractions *atomic.Int64) http.HandlerFunc {
+func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh chan<- interactionRecord, droppedInteractions *atomic.Int64, onboarding *OnboardingNotifier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		onboarding.Notify(os.Stderr)
+
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		defer r.Body.Close()
 
