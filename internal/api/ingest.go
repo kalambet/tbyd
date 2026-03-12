@@ -130,19 +130,15 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 				httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid base64 content")
 				return
 			}
-			meta := req.Metadata
-			if meta == nil {
-				meta = map[string]string{}
+			if req.Metadata == nil {
+				req.Metadata = map[string]string{}
 			}
-			text, detectedMIME, err := extractFileContent(decoded, meta)
+			text, detectedMIME, err := extractFileContent(decoded, req.Metadata)
 			if err != nil {
 				httpError(w, http.StatusBadRequest, "invalid_request_error", "%v", err)
 				return
 			}
 			resolvedContent = text
-			if req.Metadata == nil {
-				req.Metadata = map[string]string{}
-			}
 			req.Metadata["mime_type"] = detectedMIME
 
 		default:

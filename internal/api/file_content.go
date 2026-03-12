@@ -43,11 +43,15 @@ func extractFileContent(data []byte, metadata map[string]string) (string, string
 	}
 
 	// Filename extension override for markdown (http.DetectContentType cannot
-	// distinguish markdown from plain text).
+	// distinguish markdown from plain text). Only apply when the resolved MIME
+	// is generic (text/plain or application/octet-stream) to avoid
+	// reclassifying specific types (e.g., a PDF with a .md filename).
 	if filename, ok := metadata["filename"]; ok {
 		ext := strings.ToLower(filepath.Ext(filename))
 		if ext == ".md" || ext == ".markdown" {
-			mime = "text/markdown"
+			if mime == "text/plain" || mime == "application/octet-stream" {
+				mime = "text/markdown"
+			}
 		}
 	}
 
