@@ -268,7 +268,8 @@ public final class ShareViewController: NSViewController {
     /// Streams base64 encoding in fixed-size chunks to avoid the ~3x memory spike
     /// that results from loading the entire file into `Data` at once.
     /// `chunkSize` must be a multiple of 3 so each chunk encodes cleanly without padding.
-    private func base64EncodedContents(of url: URL) throws -> String {
+    /// `nonisolated` so it can be called from a detached task without hopping to @MainActor.
+    private nonisolated func base64EncodedContents(of url: URL) throws -> String {
         let chunkSize = 3 * 1024  // 3 KB — multiple of 3 for valid base64 boundaries
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -282,7 +283,7 @@ public final class ShareViewController: NSViewController {
     }
 
     private func resolveFileURL(_ url: URL, extensionItem: NSExtensionItem) async throws -> SharedItem {
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path())
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false))
         let fileSize = (attrs[.size] as? Int) ?? 0
 
         if fileSize > Self.largeFileSizeBytes {
@@ -295,7 +296,12 @@ public final class ShareViewController: NSViewController {
             )
         }
 
-        let base64 = try base64EncodedContents(of: url)
+        // Offload synchronous file I/O and CPU-intensive base64 encoding off @MainActor
+        // to avoid freezing the Share Sheet UI for large files.
+        let base64 = try await Task.detached(priority: .userInitiated) { [weak self, url] in
+            guard let self else { throw ShareError.unsupportedContentType }
+            return try self.base64EncodedContents(of: url)
+        }.value
         let title = extensionItem.attributedTitle?.string ?? url.lastPathComponent
         let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
         return SharedItem(
