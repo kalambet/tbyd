@@ -285,6 +285,8 @@ func runServer() error {
 		api.PrintMCPSetupSnippet(os.Stderr, cfg.Server.MCPPort, apiToken)
 		if f, err := os.Create(sentinelPath); err == nil {
 			f.Close()
+		} else {
+			slog.Warn("failed to create MCP setup sentinel file; snippet may be shown again on next start", "path", sentinelPath, "error", err)
 		}
 	}
 
@@ -408,6 +410,15 @@ func showStatus() error {
 	}
 
 	printStatus("Data dir", "%s", cfg.Storage.DataDir)
+
+	// Print setup snippet if MCP has not been configured yet.
+	sentinelPath := filepath.Join(cfg.Storage.DataDir, ".mcp_setup_shown")
+	if _, err := os.Stat(sentinelPath); os.IsNotExist(err) {
+		if apiToken, err := config.GetAPIToken(config.NewKeychain()); err == nil {
+			api.PrintMCPSetupSnippet(os.Stderr, cfg.Server.MCPPort, apiToken)
+		}
+	}
+
 	return nil
 }
 

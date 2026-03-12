@@ -150,16 +150,20 @@ func NewMCPHTTPHandler(mcpSrv *server.MCPServer, token string) http.Handler {
 }
 
 // mcpBearerAuth wraps next with Authorization: Bearer <token> enforcement.
-// The token comparison is unconditionally constant-time to avoid timing oracles.
-// Panics at construction time if token is empty, preventing a misconfigured server
-// from accepting any request (ConstantTimeCompare("","") == 1).
+// Panics at construction time if token is empty to prevent a misconfigured
+// server from accepting any request.
 func mcpBearerAuth(token string, next http.Handler) http.Handler {
 	if token == "" {
 		panic("mcpBearerAuth: token must not be empty")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Extract whatever follows "Bearer " (empty string if absent/malformed).
-		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// Only accept the "Bearer " scheme; anything else (including a bare token
+		// without the prefix) is rejected before comparison.
+		authHeader := r.Header.Get("Authorization")
+		var provided string
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			provided = authHeader[len("Bearer "):]
+		}
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 			http.Error(w, `{"error":{"message":"unauthorized","type":"auth_error"}}`, http.StatusUnauthorized)
 			return
