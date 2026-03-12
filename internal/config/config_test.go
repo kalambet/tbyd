@@ -328,6 +328,38 @@ func TestGetAPIToken_Deterministic(t *testing.T) {
 	}
 }
 
+// TestIsKeySet_BoolRoundtrip verifies that SetKey followed by IsKeySet returns
+// true for a boolean key, exercising the full SetKey → IsKeySet roundtrip
+// against an in-memory backend (no platform backend required).
+func TestIsKeySet_BoolRoundtrip(t *testing.T) {
+	tests := []struct {
+		value string
+	}{
+		{"true"},
+		{"false"},
+		{"1"},
+		{"0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			b := newMockBackend()
+
+			if err := setKeyWith(b, "storage.save_interactions", tt.value); err != nil {
+				t.Fatalf("setKeyWith(%q) error: %v", tt.value, err)
+			}
+
+			ok, err := isKeySetWith(b, "storage.save_interactions")
+			if err != nil {
+				t.Fatalf("isKeySetWith error: %v", err)
+			}
+			if !ok {
+				t.Errorf("isKeySetWith = false after setKeyWith(%q), want true", tt.value)
+			}
+		})
+	}
+}
+
 func contains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

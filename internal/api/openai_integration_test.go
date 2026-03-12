@@ -52,7 +52,7 @@ func TestPassthroughRoundTrip(t *testing.T) {
 
 	// Point our proxy client at the mock upstream.
 	c := proxy.NewClientWithBaseURL("test-key", upstream.URL)
-	handler := NewOpenAIHandler(context.Background(), c, nil, nil, false, false)
+	handler, _ := NewOpenAIHandler(context.Background(), c, nil, nil, false, false, nil)
 
 	// Start the tbyd server.
 	srv := httptest.NewServer(handler)

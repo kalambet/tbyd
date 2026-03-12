@@ -40,6 +40,8 @@ func NewOnboardingNotifier(cfg OnboardingConfig) *OnboardingNotifier {
 // It is safe to call from multiple goroutines; the check-and-print is
 // performed at most once per process lifetime. Errors writing to w never
 // block a request; errors persisting the flag are logged as warnings.
+// If the backend returns an error when checking save_interactions, the prompt
+// is shown once regardless (fail-open) so the user is always informed.
 func (n *OnboardingNotifier) Notify(w io.Writer) {
 	if n == nil || n.cfg == nil {
 		return

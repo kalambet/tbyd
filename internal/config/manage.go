@@ -30,8 +30,11 @@ func ShowAll(cfg Config) []KeyInfo {
 
 // SetKey writes a config key to the platform backend.
 func SetKey(key, value string) error {
-	b := newPlatformBackend()
+	return setKeyWith(newPlatformBackend(), key, value)
+}
 
+// setKeyWith is the injectable implementation used by SetKey and tests.
+func setKeyWith(b ConfigBackend, key, value string) error {
 	for _, s := range specs {
 		if s.key != key {
 			continue
@@ -65,7 +68,11 @@ func SetKey(key, value string) error {
 // SetString (see the kBool case above). If SetKey ever switches to a typed
 // setter for booleans, this function must be updated in tandem.
 func IsKeySet(key string) (bool, error) {
-	b := newPlatformBackend()
+	return isKeySetWith(newPlatformBackend(), key)
+}
+
+// isKeySetWith is the injectable implementation used by IsKeySet and tests.
+func isKeySetWith(b ConfigBackend, key string) (bool, error) {
 	_, ok, err := b.GetString(key)
 	if err != nil {
 		return false, err

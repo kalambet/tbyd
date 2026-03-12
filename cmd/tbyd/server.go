@@ -218,7 +218,7 @@ func runServer() error {
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
 	onboarding := api.NewOnboardingNotifier(&serverOnboardingConfig{cfg: cfg})
-	openaiHandler := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize, onboarding)
+	openaiHandler, waitSaveLoop := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize, onboarding)
 	appHandler := api.NewAppHandler(api.AppDeps{
 		Store:      store,
 		Profile:    profileMgr,
@@ -321,6 +321,10 @@ func runServer() error {
 	if srvShutdownErr := srv.Shutdown(shutdownCtx); srvShutdownErr != nil {
 		return srvShutdownErr
 	}
+	// Wait for the interaction-save goroutine to finish draining before the
+	// deferred store.Close() runs. The appCtx is already cancelled at this
+	// point so the loop will drain buffered records and return promptly.
+	waitSaveLoop()
 	return mcpShutdownErr
 }
 
