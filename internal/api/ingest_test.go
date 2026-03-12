@@ -412,8 +412,12 @@ func TestIngest_FilePDF(t *testing.T) {
 	if strings.HasPrefix(doc.Content, "%PDF") {
 		t.Errorf("doc.Content appears to be raw PDF bytes, not extracted text")
 	}
-	if !strings.Contains(doc.Metadata, "application/pdf") {
-		t.Errorf("doc.Metadata = %q, want it to contain %q", doc.Metadata, "application/pdf")
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(doc.Metadata), &meta); err != nil {
+		t.Fatalf("failed to unmarshal doc metadata: %v", err)
+	}
+	if meta["mime_type"] != "application/pdf" {
+		t.Errorf("doc.Metadata[\"mime_type\"] = %q, want %q", meta["mime_type"], "application/pdf")
 	}
 }
 
