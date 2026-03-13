@@ -329,10 +329,11 @@ var interactionsListCmd = &cobra.Command{
 		}
 
 		var interactions []struct {
-			ID        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UserQuery string `json:"user_query"`
-			Status    string `json:"status"`
+			ID            string `json:"id"`
+			CreatedAt     string `json:"created_at"`
+			UserQuery     string `json:"user_query"`
+			Status        string `json:"status"`
+			FeedbackScore int    `json:"feedback_score"`
 		}
 		if err := decodeJSON(resp, &interactions); err != nil {
 			return err
@@ -348,9 +349,19 @@ var interactionsListCmd = &cobra.Command{
 			if len(query) > 80 {
 				query = query[:80] + "..."
 			}
-			fmt.Printf("%s  %s  %s\n",
+			var rating string
+			switch ix.FeedbackScore {
+			case 1:
+				rating = colorize(colorGreen, "+1")
+			case -1:
+				rating = colorize(colorRed, "-1")
+			default:
+				rating = "  "
+			}
+			fmt.Printf("%s  %s  %s  %s\n",
 				colorize(colorCyan, ix.ID[:8]),
 				ix.CreatedAt,
+				rating,
 				query,
 			)
 		}
@@ -384,10 +395,61 @@ var interactionsShowCmd = &cobra.Command{
 	},
 }
 
+var interactionsRateCmd = &cobra.Command{
+	Use:   "rate <id>",
+	Short: "Rate an interaction as positive or negative",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+		positive, _ := cmd.Flags().GetBool("positive")
+		negative, _ := cmd.Flags().GetBool("negative")
+		note, _ := cmd.Flags().GetString("notes")
+
+		if positive == negative {
+			return fmt.Errorf("exactly one of --positive or --negative is required")
+		}
+
+		score := 1
+		if negative {
+			score = -1
+		}
+
+		client, err := newAPIClient()
+		if err != nil {
+			return err
+		}
+
+		body := map[string]any{"score": score}
+		if note != "" {
+			body["notes"] = note
+		}
+
+		resp, err := client.post(cmd.Context(), "/interactions/"+url.PathEscape(id)+"/feedback", body)
+		if err != nil {
+			return err
+		}
+
+		if err := decodeJSON(resp, &map[string]string{}); err != nil {
+    		return err
+		}
+
+		if score == 1 {
+			printSuccess("Rated interaction %s as positive", id)
+		} else {
+			printSuccess("Rated interaction %s as negative", id)
+		}
+		return nil
+	},
+}
+
 func init() {
+	interactionsRateCmd.Flags().Bool("positive", false, "rate as positive (+1)")
+	interactionsRateCmd.Flags().Bool("negative", false, "rate as negative (-1)")
+	interactionsRateCmd.Flags().String("notes", "", "optional notes about the rating")
 	interactionsListCmd.Flags().Int("limit", 20, "maximum number of interactions to list")
 	interactionsCmd.AddCommand(interactionsListCmd)
 	interactionsCmd.AddCommand(interactionsShowCmd)
+	interactionsCmd.AddCommand(interactionsRateCmd)
 }
 
 // --- data ---

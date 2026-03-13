@@ -9,16 +9,16 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Interaction struct {
-	ID             string
-	CreatedAt      time.Time
-	UserQuery      string
-	EnrichedPrompt string
-	CloudModel     string
-	CloudResponse  string
-	Status         string
-	FeedbackScore  int
-	FeedbackNotes  string
-	VectorIDs      string // JSON array stored as text
+	ID             string    `json:"id"`
+	CreatedAt      time.Time `json:"created_at"`
+	UserQuery      string    `json:"user_query"`
+	EnrichedPrompt string    `json:"enriched_prompt"`
+	CloudModel     string    `json:"cloud_model"`
+	CloudResponse  string    `json:"cloud_response"`
+	Status         string    `json:"status"`
+	FeedbackScore  int       `json:"feedback_score"`
+	FeedbackNotes  string    `json:"feedback_notes,omitempty"`
+	VectorIDs      string    `json:"vector_ids"` // JSON array stored as text
 }
 
 type Job struct {

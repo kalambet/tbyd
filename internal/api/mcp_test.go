@@ -479,6 +479,157 @@ func TestMCPResource_Recent(t *testing.T) {
 	}
 }
 
+func TestMCPTool_RateResponse_Positive(t *testing.T) {
+	deps, store := newTestMCPDeps(t)
+
+	// Seed an interaction to rate.
+	err := store.SaveInteraction(context.Background(), storage.Interaction{
+		ID:        "mcp-ix-pos-1",
+		CreatedAt: time.Now().UTC(),
+		UserQuery: "test query",
+		Status:    "completed",
+		VectorIDs: "[]",
+	})
+	if err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	handler := mcpRateResponse(deps)
+	req := makeCallToolRequest("rate_response", map[string]interface{}{
+		"interaction_id": "mcp-ix-pos-1",
+		"score":          "positive",
+	})
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", toolText(t, result))
+	}
+
+	// Verify score=1 was persisted.
+	ix, err := store.GetInteraction("mcp-ix-pos-1")
+	if err != nil {
+		t.Fatalf("GetInteraction: %v", err)
+	}
+	if ix.FeedbackScore != 1 {
+		t.Errorf("FeedbackScore = %d, want 1", ix.FeedbackScore)
+	}
+
+	// Verify a feedback_extract job was enqueued.
+	job, err := store.ClaimNextJob([]string{"feedback_extract"})
+	if err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+	if job == nil {
+		t.Fatal("expected a feedback_extract job to be enqueued, got nil")
+	}
+	if job.Type != "feedback_extract" {
+		t.Errorf("job.Type = %q, want %q", job.Type, "feedback_extract")
+	}
+}
+
+func TestMCPTool_RateResponse_Negative(t *testing.T) {
+	deps, store := newTestMCPDeps(t)
+
+	err := store.SaveInteraction(context.Background(), storage.Interaction{
+		ID:        "mcp-ix-neg-1",
+		CreatedAt: time.Now().UTC(),
+		UserQuery: "test query",
+		Status:    "completed",
+		VectorIDs: "[]",
+	})
+	if err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	handler := mcpRateResponse(deps)
+	req := makeCallToolRequest("rate_response", map[string]interface{}{
+		"interaction_id": "mcp-ix-neg-1",
+		"score":          "negative",
+		"notes":          "too verbose",
+	})
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error result: %s", toolText(t, result))
+	}
+
+	// Verify score=-1 and notes were persisted.
+	ix, err := store.GetInteraction("mcp-ix-neg-1")
+	if err != nil {
+		t.Fatalf("GetInteraction: %v", err)
+	}
+	if ix.FeedbackScore != -1 {
+		t.Errorf("FeedbackScore = %d, want -1", ix.FeedbackScore)
+	}
+	if ix.FeedbackNotes != "too verbose" {
+		t.Errorf("FeedbackNotes = %q, want %q", ix.FeedbackNotes, "too verbose")
+	}
+}
+
+func TestMCPTool_RateResponse_InvalidScore(t *testing.T) {
+	deps, store := newTestMCPDeps(t)
+
+	err := store.SaveInteraction(context.Background(), storage.Interaction{
+		ID:        "mcp-ix-inv-1",
+		CreatedAt: time.Now().UTC(),
+		UserQuery: "test query",
+		Status:    "completed",
+		VectorIDs: "[]",
+	})
+	if err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	handler := mcpRateResponse(deps)
+	req := makeCallToolRequest("rate_response", map[string]interface{}{
+		"interaction_id": "mcp-ix-inv-1",
+		"score":          "neutral",
+	})
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result for invalid score")
+	}
+	text := toolText(t, result)
+	if !strings.Contains(text, "positive") || !strings.Contains(text, "negative") {
+		t.Errorf("error message %q should mention valid values", text)
+	}
+}
+
+func TestMCPTool_RateResponse_NotFound(t *testing.T) {
+	deps, _ := newTestMCPDeps(t)
+
+	handler := mcpRateResponse(deps)
+	req := makeCallToolRequest("rate_response", map[string]interface{}{
+		"interaction_id": "does-not-exist",
+		"score":          "positive",
+	})
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result for unknown interaction")
+	}
+	text := toolText(t, result)
+	if !strings.Contains(text, "does-not-exist") {
+		t.Errorf("error message %q should contain the interaction ID", text)
+	}
+	if !strings.Contains(text, "not found") {
+		t.Errorf("error message %q should contain 'not found'", text)
+	}
+}
+
 func TestPrintMCPSetupSnippet(t *testing.T) {
 	const token = "my-secret-token"
 	const port = 4001

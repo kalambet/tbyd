@@ -28,17 +28,19 @@ public final class DataBrowserViewModel {
     public var searchText: String = ""
     public var stats: Stats?
     public var errorMessage: String?
+    /// Per-interaction error flag, keyed by interaction ID. Set when a feedback POST fails.
+    public var feedbackError: [String: Bool] = [:]
 
     private static let fetchLimit = 500
     private var client: APIClient?
+    private var feedbackCleanupTasks: [String: Task<Void, Never>] = [:]
 
     public init() {}
 
     public var filteredInteractions: [APIClient.Interaction] {
         guard !searchText.isEmpty else { return interactions }
         return interactions.filter { interaction in
-            (interaction.summary ?? "").localizedCaseInsensitiveContains(searchText)
-                || (interaction.query ?? "").localizedCaseInsensitiveContains(searchText)
+            (interaction.query ?? "").localizedCaseInsensitiveContains(searchText)
         }
     }
 
@@ -92,6 +94,48 @@ public final class DataBrowserViewModel {
             stats?.interactionsAtLimit = interactions.count >= Self.fetchLimit
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    public func postFeedback(interactionId: String, score: Int, notes: String?) async {
+        guard let client else { return }
+
+        // Locate the current entry for optimistic update and potential revert.
+        guard let index = interactions.firstIndex(where: { $0.id == interactionId }) else { return }
+
+        // Capture the pre-update state so we can restore it on failure.
+        let previousScore = interactions[index].feedbackScore
+        let previousNotes = interactions[index].feedbackNotes
+
+        // Optimistic update — reflect the new score immediately in the UI.
+        interactions[index] = interactions[index].withFeedback(score: score, notes: notes)
+        feedbackError[interactionId] = nil
+
+        do {
+            try await client.postFeedback(interactionId: interactionId, score: score, notes: notes)
+        } catch {
+            // Only revert if this request's score is still the one showing.
+            // A subsequent request may have already updated the UI to a newer
+            // value; blindly reverting would clobber that valid state.
+            if let revertIndex = interactions.firstIndex(where: { $0.id == interactionId }),
+               interactions[revertIndex].feedbackScore == score {
+                interactions[revertIndex] = interactions[revertIndex].withFeedback(score: previousScore, notes: previousNotes)
+            }
+            feedbackError[interactionId] = true
+            errorMessage = error.localizedDescription
+
+            // Clear the per-row error indicator after a short delay so the UI recovers.
+            // Cancel any previous cleanup task for this interaction before scheduling a new one.
+            feedbackCleanupTasks[interactionId]?.cancel()
+            feedbackCleanupTasks[interactionId] = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else {
+                    self?.feedbackCleanupTasks[interactionId] = nil
+                    return
+                }
+                self?.feedbackError[interactionId] = nil
+                self?.feedbackCleanupTasks[interactionId] = nil
+            }
         }
     }
 
