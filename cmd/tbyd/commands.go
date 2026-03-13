@@ -329,10 +329,11 @@ var interactionsListCmd = &cobra.Command{
 		}
 
 		var interactions []struct {
-			ID        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UserQuery string `json:"user_query"`
-			Status    string `json:"status"`
+			ID            string `json:"id"`
+			CreatedAt     string `json:"created_at"`
+			UserQuery     string `json:"user_query"`
+			Status        string `json:"status"`
+			FeedbackScore int    `json:"feedback_score"`
 		}
 		if err := decodeJSON(resp, &interactions); err != nil {
 			return err
@@ -348,9 +349,19 @@ var interactionsListCmd = &cobra.Command{
 			if len(query) > 80 {
 				query = query[:80] + "..."
 			}
-			fmt.Printf("%s  %s  %s\n",
+			var rating string
+			switch ix.FeedbackScore {
+			case 1:
+				rating = colorize(colorGreen, "+1")
+			case -1:
+				rating = colorize(colorRed, "-1")
+			default:
+				rating = "  "
+			}
+			fmt.Printf("%s  %s  %s  %s\n",
 				colorize(colorCyan, ix.ID[:8]),
 				ix.CreatedAt,
+				rating,
 				query,
 			)
 		}

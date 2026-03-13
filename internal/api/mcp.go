@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -395,20 +394,14 @@ func mcpRateResponse(deps MCPDeps) server.ToolHandlerFunc {
 
 		notes := req.GetString("notes", "")
 
-		if len(notes) > 2000 {
-			return mcpError("notes must be 2000 characters or fewer"), nil
-		}
-
-		if err := deps.Store.UpdateFeedback(interactionID, score, notes); err != nil {
+		if err := saveFeedback(ctx, deps.Store, interactionID, score, notes); err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return mcpError(fmt.Sprintf("interaction %s not found", interactionID)), nil
 			}
+			if errors.Is(err, errNotesTooLong) {
+				return mcpError(fmt.Sprintf("notes must be %d characters or fewer", maxFeedbackNotesLength)), nil
+			}
 			return mcpError(fmt.Sprintf("failed to update feedback: %v", err)), nil
-		}
-
-		if err := enqueueFeedbackExtract(ctx, deps.Store, interactionID); err != nil {
-			slog.Error("feedback saved but failed to enqueue feedback_extract job",
-				"interaction_id", interactionID, "error", err)
 		}
 
 		return mcpText(fmt.Sprintf("Rated interaction %s as %s", interactionID, scoreStr)), nil

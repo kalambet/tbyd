@@ -14,6 +14,8 @@ import (
 	"github.com/kalambet/tbyd/internal/storage"
 )
 
+const maxFeedbackNotesLength = 2000
+
 type feedbackRequest struct {
 	Score int    `json:"score"`
 	Notes string `json:"notes"`
@@ -37,28 +39,42 @@ func handleFeedback(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
-		if len(req.Notes) > 2000 {
-			httpError(w, http.StatusBadRequest, "invalid_request_error", "notes must be 2000 characters or fewer")
-			return
-		}
-
-		if err := deps.Store.UpdateFeedback(id, req.Score, req.Notes); err != nil {
+		if err := saveFeedback(r.Context(), deps.Store, id, req.Score, req.Notes); err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				httpError(w, http.StatusNotFound, "not_found", "interaction not found")
+				return
+			}
+			if errors.Is(err, errNotesTooLong) {
+				httpError(w, http.StatusBadRequest, "invalid_request_error", "notes must be %d characters or fewer", maxFeedbackNotesLength)
 				return
 			}
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to update feedback: %v", err)
 			return
 		}
 
-		if err := enqueueFeedbackExtract(r.Context(), deps.Store, id); err != nil {
-			slog.Error("feedback saved but failed to enqueue feedback_extract job",
-				"interaction_id", id, "error", err)
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}
+}
+
+var errNotesTooLong = fmt.Errorf("notes exceed maximum length")
+
+// saveFeedback validates notes length, persists the feedback, and enqueues
+// a feedback_extract job. Shared by the HTTP handler and MCP tool.
+func saveFeedback(ctx context.Context, store *storage.Store, id string, score int, notes string) error {
+	if len(notes) > maxFeedbackNotesLength {
+		return errNotesTooLong
+	}
+
+	if err := store.UpdateFeedback(id, score, notes); err != nil {
+		return err
+	}
+
+	if err := enqueueFeedbackExtract(ctx, store, id); err != nil {
+		slog.Error("feedback saved but failed to enqueue feedback_extract job",
+			"interaction_id", id, "error", err)
+	}
+	return nil
 }
 
 // enqueueFeedbackExtract enqueues a feedback_extract job for the given interaction ID.
