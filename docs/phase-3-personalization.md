@@ -87,44 +87,52 @@
 - Create `internal/synthesis/feedback.go`:
   - `PreferenceExtractor` struct wrapping `ollama.Client` (deep model)
   - `ExtractFromFeedback(interaction Interaction, score int, notes string) ([]PreferenceSignal, error)`
-    - Builds a prompt: given the original query, enriched prompt, response, and feedback, what does this tell us about the user's preferences?
+    - Input to LLM: `interaction.UserQuery` and `interaction.CloudResponse` **only** — do NOT include `EnrichedPrompt`. The enriched prompt contains injected retrieved context that belongs to the retrieval system, not the user; including it risks the model confusing past context with actual user preferences.
+    - Prompt: given the original query, the cloud response, the feedback score, and any notes, what does this feedback reveal about the user's preferences?
     - Returns structured `PreferenceSignal`:
       ```go
       type PreferenceSignal struct {
-          Type       string  // "positive" | "negative"
-          Pattern    string  // "user likes concise responses without preamble"
-          Confidence float64
+          Type    string  // "positive" | "negative"
+          Pattern string  // "user prefers concise responses without preamble"
       }
       ```
-  - Runs asynchronously via the SQLite-backed job queue (enqueues a `feedback_extract` job) (does not block feedback endpoint response)
+    - Note: no `Confidence` field. LLM self-reported confidence scores are poorly calibrated and produce unpredictable behavior at fixed thresholds. Confidence is replaced by the count rule in the aggregator.
+  - Runs asynchronously via the SQLite-backed job queue (enqueues a `feedback_extract` job — does not block the feedback endpoint response)
 - Create `internal/synthesis/aggregator.go`:
   - `Aggregator` accumulates `PreferenceSignal` over time
   - `Aggregate(signals []PreferenceSignal) ProfileDelta`
   - `ProfileDelta` struct: `{AddPreferences []string, RemovePreferences []string, UpdateFields map[string]string}`
-  - Only applies delta when confidence is above threshold (configurable, default 0.8) OR signal appears 3+ times
+  - **Activation rules (both applied, either is sufficient):**
+    1. **Count rule (primary):** a pattern appears ≥ 3 times as the same type (positive or negative) → apply
+    2. **Net score rule:** for a pattern with both positive and negative signals, compute `net = positive_count - negative_count`; if `net ≥ 2` → add preference; if `net ≤ -2` → remove preference; otherwise no change. This handles asymmetric evidence (4 positive vs 1 negative correctly adds the preference, unlike a simple "conflict = no change" rule).
+  - `ApplyDelta(delta ProfileDelta)` on `profile.Manager` **must** call `cache.Invalidate()` — profile changes affect enrichment and must bust the query cache. Add this explicitly to the `ApplyDelta` implementation task.
 - Wire into `profile.Manager.ApplyDelta(delta ProfileDelta)`
 - Write unit tests with synthetic feedback scenarios
 
 **Unit tests** (`internal/synthesis/feedback_test.go`) — mock `ollama.Client`:
 - `TestExtractFromFeedback_PositiveScore` — mock LLM returns signals; verify signals have `Type: "positive"`
 - `TestExtractFromFeedback_NegativeScore` — verify `Type: "negative"` on negative feedback
+- `TestExtractFromFeedback_UsesOriginalQueryOnly` — verify the prompt sent to the LLM contains `UserQuery` and `CloudResponse` but NOT `EnrichedPrompt`
 - `TestExtractFromFeedback_LLMFails` — mock LLM errors; verify empty slice returned (not panic)
 - `TestExtractFromFeedback_MalformedLLMResponse` — mock returns non-JSON; verify empty slice
 
 **Unit tests** (`internal/synthesis/aggregator_test.go`) — pure logic, no mocks needed:
-- `TestAggregate_BelowThreshold` — 1 signal with confidence 0.5; verify delta has no changes
-- `TestAggregate_AboveThreshold` — 1 signal with confidence 0.9; verify preference added
-- `TestAggregate_RepeatSignal` — same pattern 3 times at confidence 0.5; verify preference added (count rule)
-- `TestAggregate_ConflictingSignals` — same pattern as both positive and negative; verify no change (conflict resolution)
-- `TestAggregate_RemovesNegated` — existing preference X in profile; negative signal for X; verify X in `RemovePreferences`
+- `TestAggregate_BelowCount` — pattern appears 2 times as positive; verify delta has no changes (count rule requires 3)
+- `TestAggregate_CountRuleApplies` — pattern appears 3 times as positive; verify preference added
+- `TestAggregate_NetScoreAdds` — 4 positive signals + 1 negative for same pattern; verify preference added (net = +3 ≥ 2)
+- `TestAggregate_NetScoreRemoves` — 1 positive signal + 3 negative for same pattern; verify preference in RemovePreferences (net = -2)
+- `TestAggregate_TrueConflict` — 2 positive + 2 negative for same pattern; verify no change (net = 0, below threshold)
+- `TestAggregate_RemovesNegated` — existing preference X in profile; 3 negative signals for X; verify X in `RemovePreferences`
 - `TestApplyDelta_AddsPreferences` — apply delta with 2 new preferences; verify both in profile after apply
 - `TestApplyDelta_RemovesPreferences` — apply delta removing 1; verify gone from profile
 - `TestApplyDelta_Idempotent` — apply same delta twice; verify no duplicates created
+- `TestApplyDelta_InvalidatesCache` — apply delta; verify `cache.Invalidate()` called exactly once
 
 **Acceptance criteria:**
 - After 5 negative feedback instances for "verbose responses", the profile preference "concise responses" is auto-added
 - After 3 positive feedback instances for "code examples included", the preference "include code examples" is added
-- Low-confidence or one-off signals do not modify the profile
+- 4-positive-vs-1-negative for the same pattern results in the preference being added (not blocked as a "conflict")
+- Low-evidence signals (< 3 occurrences, net score < 2) do not modify the profile
 - `go test ./internal/synthesis/...` passes
 
 ---
@@ -137,7 +145,7 @@
 - Extend `internal/profile/manager.go`:
   - `GetCalibrationContext() CalibrationContext` — returns hints for calibrating the intent extractor's system prompt
     - Example: if user is a Go expert, intent extractor system prompt includes "User is an expert Go developer. Technical jargon is expected."
-  - `GetSummary()` update: prioritize explicitly-set preferences over inferred ones; truncate lower-priority items if token budget exceeded
+  - `GetSummary()` update: prioritize explicitly-set preferences over inferred ones; truncate lower-priority items if token budget exceeded. **Truncation uses explicit priority ordering (position in the `preferences` array), not recency.** A preference added 6 months ago retains its position unless the user reorders it; positional ordering is the user's signal of importance.
 - Update `internal/intent/extractor.go`:
   - Accept `CalibrationContext` in constructor
   - Inject calibration into the extraction system prompt
@@ -146,7 +154,7 @@
   - Separate "explicit preferences" section (always injected, highest priority) from "context" section (injected if budget allows)
   - Explicit preferences come directly from `profile.Preferences` and `profile.Opinions`
   - Never truncate explicit preferences — only truncate retrieved context chunks
-  - Hard cap: if explicit preferences exceed 200 tokens, include only the most recent N that fit. Remaining preferences are accessible via the MCP `recall` tool.
+  - Hard cap: if explicit preferences exceed 200 tokens, include the highest-priority N that fit (first items in the `preferences` array), not the most recently added. Remaining preferences are accessible via the MCP `recall` tool.
 
 **Unit tests** (`internal/profile/calibration_test.go`):
 - `TestGetCalibrationContext_GoExpert` — profile has `expertise.go = "expert"`; verify calibration string includes "expert Go"
@@ -165,6 +173,7 @@
 - With `expertise: {go: "expert"}` in profile, the enriched prompt includes expert-level calibration
 - Explicit preferences are always present in the system prompt regardless of context volume
 - A profile with 30 preferences + 10 context chunks fits within token budget without losing explicit preferences
+- Preference truncation keeps the first (highest-priority) items, not the most recently added
 
 ---
 
@@ -325,7 +334,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 3. Run nightly synthesis manually via `tbyd profile synthesize` → verify pending deltas appear for review
 4. Accept a delta → verify profile updated → send query → verify new preference reflected
 5. Reject a delta → verify it does not reappear in next synthesis
-6. Profile with 50 items → verify `GetSummary()` stays under 500 tokens
+6. Profile with 50 items → verify `GetSummary()` stays under 500 tokens; verify highest-priority (first) items are retained on truncation
 7. Ingest a document → verify `ingest_deep_enrich` job appears in jobs table
 8. Manually trigger deep enrichment → verify `context_docs` metadata updated with richer extraction, pass 1 data preserved
 9. Ingest 20 documents with mixed topics → trigger deep enrichment → verify topic-aware batching groups related documents
