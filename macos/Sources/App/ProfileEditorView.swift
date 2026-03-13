@@ -444,7 +444,12 @@ final class ProfileEditorViewModel {
         }
 
         isSaving = true
-        defer { isSaving = false }
+        defer {
+            // Only clear isSaving if this task was not cancelled. A cancelled
+            // task's defer must not flip the flag while a replacement task is
+            // still in flight (race with triggerSave).
+            if !Task.isCancelled { isSaving = false }
+        }
 
         do {
             let current = buildCurrentProfile()

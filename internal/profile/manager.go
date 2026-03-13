@@ -360,28 +360,28 @@ func deleteFromJSON(raw, selector string) (string, error) {
 			return "", fmt.Errorf("unmarshal array: %w", err)
 		}
 
-		// Try numeric index first.
-		if idx, err := strconv.Atoi(target); err == nil {
-			if idx < 0 || idx >= len(arr) {
-				return "", ErrFieldNotFound
-			}
+		// Try numeric index first, but only when in bounds. If the target
+		// parses as a number but the index is out of range, fall through to
+		// string-value matching so items like "1984" can still be deleted by value.
+		deleted := false
+		if idx, err := strconv.Atoi(target); err == nil && idx >= 0 && idx < len(arr) {
 			arr = append(arr[:idx], arr[idx+1:]...)
-		} else {
+			deleted = true
+		}
+		if !deleted {
 			// Remove by string value. JSON arrays of profile data always contain
 			// strings; use a type assertion rather than fmt.Sprintf to avoid false
-			// matches on non-string elements (e.g., a number whose %v representation
-			// happens to equal the target string).
-			found := false
+			// matches on non-string elements.
 			for i, v := range arr {
 				if s, ok := v.(string); ok && s == target {
 					arr = append(arr[:i], arr[i+1:]...)
-					found = true
+					deleted = true
 					break
 				}
 			}
-			if !found {
-				return "", ErrFieldNotFound
-			}
+		}
+		if !deleted {
+			return "", ErrFieldNotFound
 		}
 
 		b, err := json.Marshal(arr)
