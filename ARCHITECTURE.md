@@ -918,6 +918,10 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **2.4** Interaction storage (opt-in)
 - [x] **2.5** macOS SwiftUI menubar app
 - [x] **2.6** macOS Share Extension (Mail, Finder, Safari, any app)
+- [x] **2.7** File MIME detection and content extraction (PDF text, HTML stripping, unsupported type rejection)
+- [x] **2.8** MCP HTTP/SSE transport and config snippet (bearer auth, first-run setup snippet)
+- [x] **2.9** Interaction storage onboarding prompt (shown once, suppressed after explicit config)
+- [x] **2.10** Menubar app: `PreferencesViewModelTests` and `StatusView` extraction
 
 ### Phase 3 — Personalization
 - [ ] **3.1** Feedback collection API and UI

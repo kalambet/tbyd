@@ -9,9 +9,7 @@ struct TBYDApp: App {
         MenuBarExtra {
             MenuBarContentView(appState: appState)
         } label: {
-            Image(systemName: appState.statusIconName)
-                .symbolRenderingMode(.monochrome)
-                .foregroundStyle(appState.statusIconColor)
+            StatusView(appState: appState)
         }
 
         Window("Data Browser", id: "data-browser") {

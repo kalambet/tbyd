@@ -19,7 +19,8 @@ SUBQUERY(
         ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.text" OR
         ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "com.adobe.pdf" OR
         ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "net.daringfireball.markdown" OR
-        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.html"
+        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.html" OR
+        ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.image"
     ).@count >= 1
 ).@count >= 1
             </string>
