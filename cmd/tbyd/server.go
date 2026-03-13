@@ -217,7 +217,8 @@ func runServer() error {
 
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
-	openaiHandler := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize)
+	onboarding := api.NewOnboardingNotifier(&serverOnboardingConfig{cfg: cfg})
+	openaiHandler, waitSaveLoop := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize, onboarding)
 	appHandler := api.NewAppHandler(api.AppDeps{
 		Store:      store,
 		Profile:    profileMgr,
@@ -320,6 +321,10 @@ func runServer() error {
 	if srvShutdownErr := srv.Shutdown(shutdownCtx); srvShutdownErr != nil {
 		return srvShutdownErr
 	}
+	// Wait for the interaction-save goroutine to finish draining before the
+	// deferred store.Close() runs. The appCtx is already cancelled at this
+	// point so the loop will drain buffered records and return promptly.
+	waitSaveLoop()
 	return mcpShutdownErr
 }
 
@@ -440,6 +445,27 @@ func apiGet(client *http.Client, url, token string) (*http.Response, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return client.Do(req)
+}
+
+// serverOnboardingConfig adapts the loaded config to the api.OnboardingConfig interface.
+type serverOnboardingConfig struct {
+	cfg config.Config
+}
+
+func (s *serverOnboardingConfig) SaveInteractionsExplicitlySet() (bool, error) {
+	return config.IsKeySet("storage.save_interactions")
+}
+
+// OnboardingShown reads the startup-time snapshot of the config value.
+// This is intentionally different from SaveInteractionsExplicitlySet (which
+// queries the live backend): onboarding_shown only needs to be accurate at
+// process start, and a restart is required for a reset to take effect anyway.
+func (s *serverOnboardingConfig) OnboardingShown() bool {
+	return s.cfg.Storage.OnboardingShown
+}
+
+func (s *serverOnboardingConfig) MarkOnboardingShown() error {
+	return config.SetKey("storage.onboarding_shown", "true")
 }
 
 // engineChatAdapter wraps engine.Engine to satisfy ingest.ChatEngine.

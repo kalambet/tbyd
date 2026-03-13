@@ -37,6 +37,7 @@ type OllamaConfig struct {
 type StorageConfig struct {
 	DataDir          string
 	SaveInteractions bool
+	OnboardingShown  bool
 }
 
 type ProxyConfig struct {

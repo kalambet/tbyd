@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,7 +21,9 @@ import (
 	"github.com/kalambet/tbyd/internal/storage"
 )
 
-const maxRequestBodySize = 1 << 20 // 1MB
+const maxRequestBodySize = 1 << 20        // 1MB
+const maxCaptureBytesStreaming = 1 << 20  // 1MB cap for accumulated streaming content
+const maxResponseBodyBytes = 10 << 20    // 10MB cap for non-streaming response body
 
 // InteractionSaver persists interactions and enqueues summarization jobs.
 // All methods accept a context so that implementations can use context-aware
@@ -67,30 +70,54 @@ func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan 
 }
 
 // NewOpenAIHandler returns an http.Handler implementing the OpenAI-compatible
-// REST API. When enricher is non-nil, incoming chat requests are enriched
-// before forwarding to the cloud proxy. Passing nil disables enrichment
-// (passthrough mode). When saver is non-nil and saveInteractions is true,
-// completed interactions are persisted and queued for summarization.
+// REST API and a cleanup function the caller must invoke after the HTTP server
+// has stopped accepting requests. The cleanup function blocks until the
+// background interaction-save goroutine has finished draining, ensuring all
+// buffered saves complete before the store is closed.
+//
+// When enricher is non-nil, incoming chat requests are enriched before
+// forwarding to the cloud proxy. Passing nil disables enrichment (passthrough
+// mode). When saver is non-nil and saveInteractions is true, completed
+// interactions are persisted and queued for summarization.
 //
 // appCtx controls the lifetime of the background save goroutine and must
 // outlive the server's request-handling lifetime. Pass context.Background()
 // in tests or when save is disabled.
-func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool) http.Handler {
+//
+// onboarding is optional; pass nil to disable the onboarding prompt. Notify
+// is called once during handler setup. The sync.Once inside the notifier
+// ensures the check-and-print logic runs at most once per process lifetime,
+// making it safe even if the handler were created multiple times.
+func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool, onboarding *OnboardingNotifier) (http.Handler, func()) {
 	r := chi.NewRouter()
+
+	// Call onboarding once at setup time, not on every request.
+	onboarding.Notify(os.Stderr)
 
 	// Start a bounded save channel and single consumer goroutine.
 	var saveCh chan interactionRecord
 	var droppedInteractions atomic.Int64
+	var saveLoopDone chan struct{}
 	if saveInteractions && saver != nil {
 		saveCh = make(chan interactionRecord, 64)
-		go interactionSaveLoop(appCtx, saver, saveCh, enqueueSummarize)
+		saveLoopDone = make(chan struct{})
+		go func() {
+			defer close(saveLoopDone)
+			interactionSaveLoop(appCtx, saver, saveCh, enqueueSummarize)
+		}()
+	}
+
+	cleanup := func() {
+		if saveLoopDone != nil {
+			<-saveLoopDone
+		}
 	}
 
 	r.Get("/health", handleHealth(&droppedInteractions))
 	r.Get("/v1/models", handleModels(p))
 	r.Post("/v1/chat/completions", handleChatCompletions(p, enricher, saveCh, &droppedInteractions))
 
-	return r
+	return r, cleanup
 }
 
 func handleHealth(droppedInteractions *atomic.Int64) http.HandlerFunc {
@@ -173,7 +200,7 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 				status = "aborted"
 			}
 		} else {
-			body, err := io.ReadAll(rc)
+			body, err := io.ReadAll(io.LimitReader(rc, maxResponseBodyBytes))
 			if err != nil {
 				httpError(w, http.StatusBadGateway, "api_error", "reading upstream response: %v", err)
 				return
@@ -350,8 +377,10 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string,
 						if streamModel == "" && chunk.Model != "" {
 							streamModel = chunk.Model
 						}
-						for _, c := range chunk.Choices {
-							contentBuilder.WriteString(c.Delta.Content)
+						if contentBuilder.Len() < maxCaptureBytesStreaming {
+							for _, c := range chunk.Choices {
+								contentBuilder.WriteString(c.Delta.Content)
+							}
 						}
 					}
 				}
