@@ -429,9 +429,8 @@ var interactionsRateCmd = &cobra.Command{
 			return err
 		}
 
-		var result map[string]string
-		if err := decodeJSON(resp, &result); err != nil {
-			return err
+		if err := decodeJSON(resp, &map[string]string{}); err != nil {
+    		return err
 		}
 
 		if score == 1 {
