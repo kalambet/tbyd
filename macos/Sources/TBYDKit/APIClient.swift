@@ -39,14 +39,29 @@ public actor APIClient {
 
     // MARK: - Profile
 
-    public func getProfile() async throws -> [String: AnyCodable] {
+    public func getProfile() async throws -> Profile {
         let (data, _) = try await get("/profile")
-        return try JSONDecoder().decode([String: AnyCodable].self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(Profile.self, from: data)
     }
 
-    public func patchProfile(_ fields: [String: Any]) async throws {
+    public func patchProfile(_ patch: ProfilePatch) async throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let body = try encoder.encode(patch)
+        let _ = try await request("PATCH", path: "/profile", body: body)
+    }
+
+    /// Sends a free-form PATCH with an arbitrary dictionary (used by PreferencesViewModel
+    /// for non-profile-typed fields such as `save_interactions`).
+    public func patchProfileRaw(_ fields: [String: Any]) async throws {
         let body = try JSONSerialization.data(withJSONObject: fields)
         let _ = try await request("PATCH", path: "/profile", body: body)
+    }
+
+    public func deleteProfileField(path fieldPath: String) async throws {
+        let _ = try await request("DELETE", path: "/profile/\(fieldPath)")
     }
 
     // MARK: - Interactions

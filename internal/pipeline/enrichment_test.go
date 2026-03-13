@@ -124,6 +124,17 @@ func (m *mockProfileStore) GetAllProfileKeys() (map[string]string, error) {
 	return m.keys, nil
 }
 
+func (m *mockProfileStore) DeleteProfileKey(key string) error {
+	if m.keys == nil {
+		return errors.New("not found")
+	}
+	if _, ok := m.keys[key]; !ok {
+		return errors.New("not found")
+	}
+	delete(m.keys, key)
+	return nil
+}
+
 // --- helpers ---
 
 func makeReq(userMsg string) proxy.ChatRequest {

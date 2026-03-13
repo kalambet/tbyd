@@ -173,7 +173,7 @@ public final class PreferencesViewModel {
             return
         }
         do {
-            try await client.patchProfile(["save_interactions": enabled])
+            try await client.patchProfileRaw(["save_interactions": enabled])
             errorMessage = nil
         } catch {
             errorMessage = "Failed to update save interactions: \(error.localizedDescription)"

@@ -101,6 +101,11 @@ final class PreferencesMock: BodyAwareBaseMockProtocol, @unchecked Sendable {
     override class var requestHandler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))? { handler }
 }
 
+final class ProfileEditorMock: BodyAwareBaseMockProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))?
+    override class var requestHandler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))? { handler }
+}
+
 func makeSession(for protocolClass: AnyClass) -> URLSession {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [protocolClass]
