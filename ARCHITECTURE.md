@@ -119,6 +119,7 @@ internal/config/   ← platform-native config (UserDefaults on macOS, XDG JSON o
   - `recall` — retrieve relevant past context
   - `set_preference` — update user preferences
   - `summarize_session` — distill current session into memory
+  - `rate_response` — rate the last response (positive/negative) using the interaction ID surfaced via the `tbyd-metadata` SSE event or `X-TBYD-Interaction-ID` header (Phase 3)
 - Resources exposed:
   - `user://profile` — current user profile
   - `user://context` — retrieved relevant context for current conversation
@@ -290,6 +291,24 @@ context_docs (
 - All access goes through a `VectorStore` interface — backend is swappable without changing retrieval logic
 - Embedding model: `nomic-embed-text` via Ollama (768 dimensions, runs locally)
 - Migration path to LanceDB (ANN indexes for sub-10ms search at scale) documented in `docs/vectorstore-migration.md`
+- **`quality_score REAL DEFAULT 1.0`** column (Phase 3.8): multiplied into the final retrieval score; decremented on negative feedback (-0.1), incremented on positive feedback (+0.05); clamped to [0.1, 2.0]. Provides lightweight retrieval quality improvement before Phase 4 fine-tuning.
+
+**Phase 3 additions:**
+```sql
+-- 004_synthesis.sql
+pending_profile_deltas (
+    id TEXT PRIMARY KEY,
+    delta_json TEXT NOT NULL,
+    description TEXT NOT NULL,     -- human-readable: "Add preference: concise responses"
+    source TEXT NOT NULL,           -- "nightly_synthesis" | "feedback_aggregation"
+    accepted INTEGER,               -- NULL = not reviewed; 1 = accepted; 0 = rejected
+    reviewed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+
+-- 005_retrieval_quality.sql
+ALTER TABLE context_vectors ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;
+```
 
 ### 6. Cloud Proxy — OpenRouter
 
@@ -456,9 +475,13 @@ A **two-level cache** avoids redundant enrichment for repeated or similar querie
 - "What did I decide about X" queries become answerable
 
 **Phase 3 — Preference Learning:**
+- Interaction IDs surfaced in API responses (prerequisite for feedback tools)
 - User feedback (thumbs up/down, edit) signals collected
+- Feedback signals decay retrieval quality of bad context chunks (immediate effect)
 - Local model runs periodic summarization of preference patterns
-- Profile auto-updated with inferred preferences
+- Profile auto-updated with inferred preferences; aggregation uses count rule (≥3 signals) or net score rule (Δ≥2)
+- Explicit profile editor (identity, expertise, opinions, preferences)
+- Nightly synthesis with user-reviewed delta acceptance workflow
 
 **Phase 4 — Local Model Fine-tuning (advanced, future):**
 - Once 500+ feedback-labeled interactions available
@@ -527,6 +550,12 @@ When `save_interactions` is enabled and the response is streamed (SSE):
 - On upstream error: store error details with `status = "error"`
 - Response status is tracked in the `interactions` table: `completed | aborted | error`
 
+**Interaction ID surfacing (Phase 3.7):**
+- The `interaction_id` (UUID) is generated at the start of every request and included in the response so callers can reference it for feedback
+- Non-streaming: `X-TBYD-Interaction-ID: <uuid>` response header
+- Streaming: a `event: tbyd-metadata` SSE event emitted after all content chunks and before `data: [DONE]`, containing `{"interaction_id": "<uuid>"}`. Clients that don't handle this event type silently ignore it per the SSE spec.
+- This ID is used by the MCP `rate_response` tool and the CLI `tbyd interactions rate` command
+
 ---
 
 ## Background Job System
@@ -552,6 +581,7 @@ jobs (
 - Failed jobs are retried with exponential backoff up to `max_attempts`
 - Completed jobs are retained for 7 days then garbage-collected
 - `ingest_deep_enrich` jobs are **batch-processed**: unlike other job types that are claimed and processed individually, the deep enrichment worker claims up to 5,000 pending jobs per run, groups them by topic similarity, and processes them together in context-window-sized batches. It loops until the queue is drained. On startup, jobs stuck in `running` for longer than 30 minutes are reset to `pending` (with incremented attempt count) to recover from crashes. This worker only activates during idle periods or the scheduled overnight window.
+- **Migration numbering** (current baseline after Phase 2): `001` initial schema, `002_add_fts5.sql`, `003_add_metadata_to_context_docs.sql`. Phase 3 adds: `004_synthesis.sql` (pending_profile_deltas), `005_retrieval_quality.sql` (quality_score on context_vectors). Phase 4 adds: `006_deep_enrichment.sql` (deep_metadata on context_docs).
 
 ---
 
@@ -878,8 +908,8 @@ Each phase has a detailed issue breakdown in `docs/`:
 | Phase 0 | [docs/phase-0-foundation.md](docs/phase-0-foundation.md) | Go scaffold, config, SQLite, Ollama, passthrough proxy |
 | Phase 1 | [docs/phase-1-enrichment.md](docs/phase-1-enrichment.md) | VectorStore, intent extraction, context retrieval, prompt composer |
 | Phase 2 | [docs/phase-2-user-surfaces.md](docs/phase-2-user-surfaces.md) | MCP server, CLI, SwiftUI menubar app, Share Extension |
-| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Feedback, profile editor, preference learning, nightly synthesis, deep enrichment |
-| Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Browser extension, Feedly sync, content extraction, MLX fine-tuning |
+| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Interaction ID surfacing, typed Swift model, feedback collection, profile editor, preference learning, nightly synthesis, retrieval quality |
+| Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Deep enrichment pass, browser extension, Feedly sync, content extraction, MLX fine-tuning |
 | Phase 5 | [docs/phase-5-polish-distribution.md](docs/phase-5-polish-distribution.md) | Project rename, onboarding, encryption, Homebrew, App Store |
 
 ### Phase 0 — Foundation
@@ -924,14 +954,17 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **2.10** Menubar app: `PreferencesViewModelTests` and `StatusView` extraction
 
 ### Phase 3 — Personalization
+- [ ] **3.7** Interaction ID surfacing in API responses (prerequisite for 3.1 MCP tool)
+- [ ] **3.9** Typed Swift `Profile` model in TBYDKit (prerequisite for 3.2 SwiftUI editor)
 - [ ] **3.1** Feedback collection API and UI
 - [ ] **3.2** User profile editor (explicit digital self)
 - [ ] **3.3** Preference extraction from feedback (background job)
 - [ ] **3.4** Profile injection into enrichment pipeline (calibration)
 - [ ] **3.5** Nightly profile synthesis (deep model background pass)
-- [ ] **3.6** Deep enrichment pass (two-pass ingestion: batched deep model processing, idle/overnight trigger, topic-aware grouping, additive metadata updates)
+- [ ] **3.8** Retrieval quality feedback loop (chunk quality scores from thumbs-down)
 
 ### Phase 4 — Extended Ingestion & Model Tuning
+- [ ] **4.0** Deep enrichment pass (two-pass ingestion: batched deep model processing, idle/overnight trigger, topic-aware grouping, additive metadata updates)
 - [ ] **4.1** Browser extension (Safari + Chrome)
 - [ ] **4.2** Feedly integration (OAuth + periodic sync)
 - [ ] **4.3** Content extraction improvements (PDF chunking, OCR, HTML)
