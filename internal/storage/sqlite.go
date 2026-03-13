@@ -291,6 +291,21 @@ func (s *Store) GetAllProfileKeys() (map[string]string, error) {
 	return result, rows.Err()
 }
 
+func (s *Store) DeleteProfileKey(key string) error {
+	res, err := s.db.Exec(`DELETE FROM user_profile WHERE key = ?`, key)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- Context Docs ---
 
 func (s *Store) SaveContextDoc(doc ContextDoc) error {

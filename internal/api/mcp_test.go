@@ -79,6 +79,16 @@ func (m *mockProfileStore) GetAllProfileKeys() (map[string]string, error) {
 	return cp, nil
 }
 
+func (m *mockProfileStore) DeleteProfileKey(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.data[key]; !ok {
+		return errors.New("not found")
+	}
+	delete(m.data, key)
+	return nil
+}
+
 // --- helpers ---
 
 func newTestMCPDeps(t *testing.T) (MCPDeps, *storage.Store) {

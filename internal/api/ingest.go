@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -21,6 +23,31 @@ import (
 
 const maxIngestBodySize = 10 << 20 // 10MB
 const maxURLFetchSize = 5 << 20    // 5MB
+
+// profileKeyAllowlist is the set of storage keys accepted by PATCH /profile.
+// Any key not in this set is rejected with 400 to prevent arbitrary key injection.
+var profileKeyAllowlist = map[string]struct{}{
+	"identity.role":          {},
+	"identity.expertise":     {},
+	"identity.working_context": {},
+	"communication.tone":     {},
+	"communication.detail_level": {},
+	"communication.format":   {},
+	"interests.primary":      {},
+	"interests.emerging":     {},
+	"opinions":               {},
+	"preferences":            {},
+	"language":               {},
+	"cloud_model_preference": {},
+}
+
+const maxProfileFieldPathLen = 256
+
+// profileFieldPathRe validates the DELETE /profile/:field path parameter.
+// The path portion outside brackets allows alphanumeric, dots, underscores, and hyphens.
+// Bracket contents (array item values) allow any printable character including spaces
+// to support values like interests.primary[Distributed Systems].
+var profileFieldPathRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+(\[[^\]\x00-\x1f]+\])?$`)
 
 type IngestRequest struct {
 	Source   string            `json:"source"`
@@ -58,6 +85,7 @@ func NewAppHandler(deps AppDeps) http.Handler {
 	r.Post("/ingest", handleIngest(deps))
 	r.Get("/profile", handleGetProfile(deps))
 	r.Patch("/profile", handlePatchProfile(deps))
+	r.Delete("/profile/{field}", handleDeleteProfileField(deps))
 	r.Get("/interactions", handleListInteractions(deps))
 	r.Get("/interactions/{id}", handleGetInteraction(deps))
 	r.Delete("/interactions/{id}", handleDeleteInteraction(deps))
@@ -227,6 +255,20 @@ func handlePatchProfile(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
+		// Validate all keys against the allowlist before writing any of them.
+		// This prevents arbitrary key injection and provides a clear error before
+		// any partial writes occur.
+		// Note: individual SetField calls are not atomic with respect to each other;
+		// a failure mid-loop leaves the profile partially updated. For the current
+		// single-user use-case this is acceptable. A future improvement would be to
+		// batch the writes in a single storage transaction.
+		for key := range fields {
+			if _, ok := profileKeyAllowlist[key]; !ok {
+				httpError(w, http.StatusBadRequest, "invalid_request_error", "unrecognised profile key %q", key)
+				return
+			}
+		}
+
 		for key, value := range fields {
 			if err := deps.Profile.SetField(key, value); err != nil {
 				httpError(w, http.StatusInternalServerError, "api_error", "failed to set field %q: %v", key, err)
@@ -236,6 +278,36 @@ func handlePatchProfile(deps AppDeps) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "updated"})
+	}
+}
+
+func handleDeleteProfileField(deps AppDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		field, _ := url.PathUnescape(chi.URLParam(r, "field"))
+
+		// Validate path length and character set before touching storage.
+		if len(field) > maxProfileFieldPathLen {
+			httpError(w, http.StatusBadRequest, "invalid_request_error",
+				"field path too long (max %d characters)", maxProfileFieldPathLen)
+			return
+		}
+		if !profileFieldPathRe.MatchString(field) {
+			httpError(w, http.StatusBadRequest, "invalid_request_error",
+				"field path contains invalid characters (allowed: alphanumeric, '.', '[', ']', '_', '-')")
+			return
+		}
+
+		if err := deps.Profile.DeleteField(field); err != nil {
+			if errors.Is(err, profile.ErrFieldNotFound) {
+				httpError(w, http.StatusNotFound, "not_found", "profile field %q not found", field)
+				return
+			}
+			httpError(w, http.StatusInternalServerError, "api_error", "failed to delete profile field %q: %v", field, err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 	}
 }
 
