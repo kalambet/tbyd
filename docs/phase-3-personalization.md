@@ -367,6 +367,7 @@
   ```sql
   ALTER TABLE context_vectors ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;
   CREATE INDEX IF NOT EXISTS idx_context_vectors_quality ON context_vectors(quality_score);
+  ALTER TABLE interactions ADD COLUMN feedback_reason TEXT;
   ```
 - Update `internal/storage/sqlite.go`: add `UpdateVectorQuality(id string, delta float64) error`
   - Applies: `quality_score = MAX(0.1, MIN(2.0, quality_score + delta))`

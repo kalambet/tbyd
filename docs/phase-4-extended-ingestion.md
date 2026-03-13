@@ -15,7 +15,7 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
   - `IdleDetector` struct
   - `IsIdle() bool` — checks CPU usage < threshold AND available memory > threshold
   - macOS: use subprocess approach (`sysctl` for CPU, `vm_stat` for memory) — **do not use CGO** to call `host_statistics`; the project uses `modernc.org/sqlite` specifically to avoid CGO, and adding it here contradicts that constraint. Parse `sysctl -n vm.loadavg` for CPU load average and `vm_stat` output for free pages.
-  - Optional: detect screen lock via `CGSessionCopyCurrentDictionary` if CGO is acceptable as an isolated addition; otherwise poll `ioreg -c IOHIDSystem` via subprocess
+  - Optional: detect screen lock by polling `ioreg -c IOHIDSystem` via subprocess
   - Config: `enrichment.deep_idle_cpu_max_percent` (default: 10) and `enrichment.deep_idle_mem_min_gb` (default: 4)
 - Implement context-window-aware batching in `internal/synthesis/batcher.go`:
   - `Batcher` struct with configurable max token count per batch

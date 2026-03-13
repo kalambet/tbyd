@@ -296,7 +296,7 @@ context_docs (
 **Phase 3 additions:**
 ```sql
 -- 004_synthesis.sql
-pending_profile_deltas (
+CREATE TABLE pending_profile_deltas (
     id TEXT PRIMARY KEY,
     delta_json TEXT NOT NULL,
     description TEXT NOT NULL,     -- human-readable: "Add preference: concise responses"
