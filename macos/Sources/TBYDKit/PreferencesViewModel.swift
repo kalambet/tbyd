@@ -31,7 +31,7 @@ public struct DefaultLaunchAgentManager: LaunchAgentManagerProtocol {
 }
 
 public protocol ConfigServiceProtocol: Sendable {
-    func readValues() async -> [String: String]
+    func readValues() async throws -> [String: String]
     func setValue(_ key: String, value: String) async throws
 }
 
@@ -42,9 +42,9 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
         self.binaryPath = binaryPath
     }
 
-    public func readValues() async -> [String: String] {
+    public func readValues() async throws -> [String: String] {
         let path = binaryPath
-        return await (try? Task.detached {
+        return try await Task.detached {
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: path)
@@ -54,6 +54,9 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
             try process.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw DefaultConfigService.ConfigError.commandFailed(operation: "show", exitCode: process.terminationStatus)
+            }
             guard let output = String(data: data, encoding: .utf8) else { return [:] }
 
             var result: [String: String] = [:]
@@ -64,7 +67,7 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
                 }
             }
             return result
-        }.value) ?? [:]
+        }.value
     }
 
     public func setValue(_ key: String, value: String) async throws {
@@ -78,18 +81,18 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
             try process.run()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
-                throw DefaultConfigService.ConfigError.commandFailed(key: key, exitCode: process.terminationStatus)
+                throw DefaultConfigService.ConfigError.commandFailed(operation: "set \(key)", exitCode: process.terminationStatus)
             }
         }.value
     }
 
     public enum ConfigError: LocalizedError {
-        case commandFailed(key: String, exitCode: Int32)
+        case commandFailed(operation: String, exitCode: Int32)
 
         public var errorDescription: String? {
             switch self {
-            case let .commandFailed(key, exitCode):
-                return "tbyd config set \(key) failed (exit \(exitCode))"
+            case let .commandFailed(operation, exitCode):
+                return "tbyd config \(operation) failed (exit \(exitCode))"
             }
         }
     }
@@ -165,6 +168,7 @@ public final class PreferencesViewModel {
             errorMessage = nil
         } catch {
             errorMessage = "Failed to update save interactions: \(error.localizedDescription)"
+            saveInteractions = !enabled  // revert toggle to match actual server state
             return
         }
         // Keep local config in sync so loadConfigValues reads the correct value on next launch.
@@ -186,7 +190,13 @@ public final class PreferencesViewModel {
     // MARK: - tbyd config helpers
 
     private func loadConfigValues() async {
-        let values = await configService.readValues()
+        let values: [String: String]
+        do {
+            values = try await configService.readValues()
+        } catch {
+            errorMessage = "Failed to load config: \(error.localizedDescription)"
+            return
+        }
         if let v = values["storage.save_interactions"] {
             saveInteractions = v.lowercased() == "true"
         }

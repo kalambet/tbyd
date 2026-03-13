@@ -33,7 +33,7 @@ struct PreferencesViewModelTests {
     private final class MockConfigService: ConfigServiceProtocol, @unchecked Sendable {
         var values: [String: String] = [:]
 
-        func readValues() async -> [String: String] { values }
+        func readValues() async throws -> [String: String] { values }
         func setValue(_ key: String, value: String) async throws { values[key] = value }
     }
 
