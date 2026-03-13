@@ -85,9 +85,9 @@ func interactionSaveLoop(ctx context.Context, saver InteractionSaver, ch <-chan 
 // in tests or when save is disabled.
 //
 // onboarding is optional; pass nil to disable the onboarding prompt. Notify
-// is called once during handler setup (not per-request) so the prompt is
-// printed at most once per server start regardless of how the sync.Once inside
-// the notifier behaves.
+// is called once during handler setup. The sync.Once inside the notifier
+// ensures the check-and-print logic runs at most once per process lifetime,
+// making it safe even if the handler were created multiple times.
 func NewOpenAIHandler(appCtx context.Context, p *proxy.Client, enricher *pipeline.Enricher, saver InteractionSaver, saveInteractions bool, enqueueSummarize bool, onboarding *OnboardingNotifier) (http.Handler, func()) {
 	r := chi.NewRouter()
 

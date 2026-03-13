@@ -491,21 +491,18 @@ func TestOnboardingPrompt_ShownOnce(t *testing.T) {
 		t.Errorf("MarkOnboardingShown called %d times, want 1", cfg.markShownCalled)
 	}
 
-	// Also verify the handler passes the notifier correctly by sending two requests.
-	h, _ := NewOpenAIHandler(context.Background(), c, nil, nil, false, false, notifier)
-	for i := 0; i < 2; i++ {
-		body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
-		rr := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-		h.ServeHTTP(rr, req)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("request %d: status = %d, want %d", i+1, rr.Code, http.StatusOK)
-		}
+	// Also verify that NewOpenAIHandler itself calls Notify exactly once at
+	// construction time (not per-request). Use a fresh notifier so the
+	// sync.Once has not been consumed by the direct Notify calls above.
+	freshCfg := &mockOnboardingConfig{
+		saveInteractionsSet: false,
+		onboardingShown:     false,
 	}
+	freshNotifier := NewOnboardingNotifier(freshCfg)
+	_, _ = NewOpenAIHandler(context.Background(), c, nil, nil, false, false, freshNotifier)
 
-	// sync.Once ensures the notifier fired at most once regardless of handler calls.
-	if cfg.markShownCalled != 1 {
-		t.Errorf("after handler requests: MarkOnboardingShown called %d times, want 1", cfg.markShownCalled)
+	if freshCfg.markShownCalled != 1 {
+		t.Errorf("after NewOpenAIHandler: MarkOnboardingShown called %d times, want 1", freshCfg.markShownCalled)
 	}
 }
 
