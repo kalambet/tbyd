@@ -47,15 +47,18 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
         return try await Task.detached {
             let process = Process()
             let pipe = Pipe()
+            let errPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: path)
             process.arguments = ["config", "show"]
             process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
+            process.standardError = errPipe
             try process.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
-                throw DefaultConfigService.ConfigError.commandFailed(operation: "show", exitCode: process.terminationStatus)
+                let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw DefaultConfigService.ConfigError.commandFailed(operation: "show", exitCode: process.terminationStatus, stderr: errorOutput)
             }
             guard let output = String(data: data, encoding: .utf8) else { return [:] }
 
@@ -74,24 +77,30 @@ public final class DefaultConfigService: ConfigServiceProtocol, @unchecked Senda
         let path = binaryPath
         try await Task.detached {
             let process = Process()
+            let errPipe = Pipe()
             process.executableURL = URL(fileURLWithPath: path)
             process.arguments = ["config", "set", key, value]
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            process.standardError = errPipe
             try process.run()
+            let errorData = errPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
-                throw DefaultConfigService.ConfigError.commandFailed(operation: "set \(key)", exitCode: process.terminationStatus)
+                let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw DefaultConfigService.ConfigError.commandFailed(operation: "set \(key)", exitCode: process.terminationStatus, stderr: errorOutput)
             }
         }.value
     }
 
     public enum ConfigError: LocalizedError {
-        case commandFailed(operation: String, exitCode: Int32)
+        case commandFailed(operation: String, exitCode: Int32, stderr: String?)
 
         public var errorDescription: String? {
             switch self {
-            case let .commandFailed(operation, exitCode):
+            case let .commandFailed(operation, exitCode, stderr):
+                if let stderr, !stderr.isEmpty {
+                    return "tbyd config \(operation) failed (exit \(exitCode)): \(stderr)"
+                }
                 return "tbyd config \(operation) failed (exit \(exitCode))"
             }
         }
