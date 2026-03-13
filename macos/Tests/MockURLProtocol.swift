@@ -91,6 +91,11 @@ final class DataBrowserMock: BaseMockProtocol, @unchecked Sendable {
     override class var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))? { handler }
 }
 
+final class DataBrowserBodyMock: BodyAwareBaseMockProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))?
+    override class var requestHandler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))? { handler }
+}
+
 final class PreferencesMock: BodyAwareBaseMockProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var handler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))?
     override class var requestHandler: ((URLRequest, Data?) throws -> (HTTPURLResponse, Data))? { handler }

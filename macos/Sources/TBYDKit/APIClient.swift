@@ -51,17 +51,67 @@ public actor APIClient {
 
     // MARK: - Interactions
 
-    public struct Interaction: Codable, Sendable, Identifiable {
+    public struct Interaction: Decodable, Equatable, Sendable, Identifiable {
         public let id: String
+        /// The user's original query (`user_query` in the Go model).
         public let query: String?
+        /// The cloud model's response (`cloud_response` in the Go model).
         public let response: String?
-        public let summary: String?
         public let createdAt: String?
+        public var feedbackScore: Int?
+        public var feedbackNotes: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, query, response, summary
+            case id
+            case query = "user_query"
+            case response = "cloud_response"
             case createdAt = "created_at"
+            case feedbackScore = "feedback_score"
+            case feedbackNotes = "feedback_notes"
         }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            query = try container.decodeIfPresent(String.self, forKey: .query)
+            response = try container.decodeIfPresent(String.self, forKey: .response)
+            createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
+            feedbackNotes = try container.decodeIfPresent(String.self, forKey: .feedbackNotes)
+            // Go server serialises unrated rows as feedback_score: 0; treat 0 as unrated (nil).
+            let raw = try container.decodeIfPresent(Int.self, forKey: .feedbackScore)
+            feedbackScore = (raw == 0) ? nil : raw
+        }
+
+        /// Memberwise initializer for constructing Interaction values directly (e.g., in tests).
+        public init(
+            id: String,
+            query: String? = nil,
+            response: String? = nil,
+            createdAt: String? = nil,
+            feedbackScore: Int? = nil,
+            feedbackNotes: String? = nil
+        ) {
+            self.id = id
+            self.query = query
+            self.response = response
+            self.createdAt = createdAt
+            self.feedbackScore = feedbackScore
+            self.feedbackNotes = feedbackNotes
+        }
+
+        /// Returns a copy with updated feedback fields.
+        public func withFeedback(score: Int?, notes: String?) -> Interaction {
+            var copy = self
+            copy.feedbackScore = score
+            copy.feedbackNotes = notes
+            return copy
+        }
+
+        /// `true` when this interaction has a positive (thumbs-up) rating.
+        public var isPositiveRated: Bool { feedbackScore == 1 }
+
+        /// `true` when this interaction has a negative (thumbs-down) rating.
+        public var isNegativeRated: Bool { feedbackScore == -1 }
     }
 
     public func listInteractions(limit: Int = 20, offset: Int = 0) async throws -> [Interaction] {
@@ -76,6 +126,15 @@ public actor APIClient {
 
     public func deleteInteraction(id: String) async throws {
         let _ = try await request("DELETE", path: "/interactions/\(id)")
+    }
+
+    public func postFeedback(interactionId: String, score: Int, notes: String?) async throws {
+        struct FeedbackBody: Encodable {
+            let score: Int
+            let notes: String?
+        }
+        let body = try JSONEncoder().encode(FeedbackBody(score: score, notes: notes))
+        let _ = try await request("POST", path: "/interactions/\(interactionId)/feedback", body: body)
     }
 
     // MARK: - Context Docs

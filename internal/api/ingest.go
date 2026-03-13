@@ -61,6 +61,7 @@ func NewAppHandler(deps AppDeps) http.Handler {
 	r.Get("/interactions", handleListInteractions(deps))
 	r.Get("/interactions/{id}", handleGetInteraction(deps))
 	r.Delete("/interactions/{id}", handleDeleteInteraction(deps))
+	r.Post("/interactions/{id}/feedback", handleFeedback(deps))
 	r.Get("/context-docs", handleListContextDocs(deps))
 	r.Delete("/context-docs/{id}", handleDeleteContextDoc(deps))
 	r.Get("/recall", handleRecall(deps))

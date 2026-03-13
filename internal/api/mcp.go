@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -106,6 +108,16 @@ func NewMCPServer(deps MCPDeps) *server.MCPServer {
 			mcp.WithString("value", mcp.Description("Value to set"), mcp.Required()),
 		),
 		mcpSetPreference(deps),
+	)
+
+	s.AddTool(
+		mcp.NewTool("rate_response",
+			mcp.WithDescription("Rate a stored interaction as positive or negative and optionally add a note."),
+			mcp.WithString("interaction_id", mcp.Description("ID of the interaction to rate"), mcp.Required()),
+			mcp.WithString("score", mcp.Description(`Rating: "positive" or "negative"`), mcp.Required()),
+			mcp.WithString("notes", mcp.Description("Optional free-text note about the rating")),
+		),
+		mcpRateResponse(deps),
 	)
 
 	s.AddTool(
@@ -356,6 +368,50 @@ func mcpSummarizeSession(deps MCPDeps) server.ToolHandlerFunc {
 		}
 
 		return mcpText(summary), nil
+	}
+}
+
+func mcpRateResponse(deps MCPDeps) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		interactionID, err := req.RequireString("interaction_id")
+		if err != nil {
+			return mcpError("interaction_id is required"), nil
+		}
+
+		scoreStr, err := req.RequireString("score")
+		if err != nil {
+			return mcpError("score is required"), nil
+		}
+
+		var score int
+		switch scoreStr {
+		case "positive":
+			score = 1
+		case "negative":
+			score = -1
+		default:
+			return mcpError(`score must be "positive" or "negative"`), nil
+		}
+
+		notes := req.GetString("notes", "")
+
+		if len(notes) > 2000 {
+			return mcpError("notes must be 2000 characters or fewer"), nil
+		}
+
+		if err := deps.Store.UpdateFeedback(interactionID, score, notes); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return mcpError(fmt.Sprintf("interaction %s not found", interactionID)), nil
+			}
+			return mcpError(fmt.Sprintf("failed to update feedback: %v", err)), nil
+		}
+
+		if err := enqueueFeedbackExtract(ctx, deps.Store, interactionID); err != nil {
+			slog.Error("feedback saved but failed to enqueue feedback_extract job",
+				"interaction_id", interactionID, "error", err)
+		}
+
+		return mcpText(fmt.Sprintf("Rated interaction %s as %s", interactionID, scoreStr)), nil
 	}
 }
 
