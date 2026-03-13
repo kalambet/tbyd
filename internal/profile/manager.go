@@ -296,23 +296,16 @@ func resolveDeletePath(path string, keys map[string]string) (storageKey, subPath
 	if bracketIdx := strings.Index(path, "["); bracketIdx > 0 && strings.HasSuffix(path, "]") {
 		arrayKey := path[:bracketIdx]
 		itemValue := path[bracketIdx+1 : len(path)-1]
+		// Direct match — arrayKey exists in storage.
 		if _, ok := keys[arrayKey]; ok {
 			return arrayKey, "array:" + itemValue, nil
 		}
-		// Check legacy aliases.
-		if newKey, ok := legacyKeyAliases[arrayKey]; ok {
-			if _, ok := keys[arrayKey]; ok {
-				return arrayKey, "array:" + itemValue, nil
-			}
-			// Also try the canonical key.
-			_ = newKey
-		}
-		// Check if a known key matches via legacy alias for the base path.
-		for oldKey := range legacyKeyAliases {
-			if arrayKey == oldKey {
-				if _, ok := keys[oldKey]; ok {
-					return oldKey, "array:" + itemValue, nil
-				}
+		// If direct match fails, check if arrayKey is a legacy alias for a
+		// canonical key that exists in storage (e.g., path "interests[go]"
+		// should resolve to key "interests.primary").
+		if newKey, isLegacy := legacyKeyAliases[arrayKey]; isLegacy {
+			if _, ok := keys[newKey]; ok {
+				return newKey, "array:" + itemValue, nil
 			}
 		}
 		return "", "", ErrFieldNotFound
