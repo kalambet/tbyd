@@ -165,7 +165,10 @@ public final class PreferencesViewModel {
             errorMessage = nil
         } catch {
             errorMessage = "Failed to update save interactions: \(error.localizedDescription)"
+            return
         }
+        // Keep local config in sync so loadConfigValues reads the correct value on next launch.
+        await setConfigValue("storage.save_interactions", value: enabled ? "true" : "false")
     }
 
     public func saveFastModel() async {

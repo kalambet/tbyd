@@ -108,12 +108,22 @@ struct PreferencesViewModelTests {
         }
     }
 
-    @Test("setAutoStart delegates to LaunchAgentManager")
-    func testSetAutoStart() throws {
+    @Test("setAutoStart enables LaunchAgentManager")
+    func testSetAutoStart_enable() throws {
         let mockAgent = MockLaunchAgentManager()
         let vm = PreferencesViewModel(launchAgent: mockAgent)
         vm.setAutoStart(true)
         #expect(mockAgent.isEnabled == true)
         #expect(mockAgent.setEnabledCalls == [true])
+    }
+
+    @Test("setAutoStart disables LaunchAgentManager")
+    func testSetAutoStart_disable() throws {
+        let mockAgent = MockLaunchAgentManager()
+        mockAgent.isEnabled = true
+        let vm = PreferencesViewModel(launchAgent: mockAgent)
+        vm.setAutoStart(false)
+        #expect(mockAgent.isEnabled == false)
+        #expect(mockAgent.setEnabledCalls == [false])
     }
 }

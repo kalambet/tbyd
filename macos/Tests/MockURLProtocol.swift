@@ -53,8 +53,14 @@ class BodyAwareBaseMockProtocol: URLProtocol, @unchecked Sendable {
                 let read = stream.read(buffer, maxLength: bufferSize)
                 if read > 0 {
                     data.append(buffer, count: read)
+                } else if read == 0 {
+                    break  // EOF
                 } else {
-                    break
+                    // read < 0 means a stream error — fail the request
+                    let error = stream.streamError ?? URLError(.cannotDecodeRawData)
+                    stream.close()
+                    client?.urlProtocol(self, didFailWithError: error)
+                    return  // defer deallocates buffer
                 }
             }
             stream.close()

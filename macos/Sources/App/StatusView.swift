@@ -1,12 +1,12 @@
 import SwiftUI
 import TBYDKit
 
-/// The menubar icon view for the tbyd status indicator.
+/// The menubar status indicator showing the icon and current server status label.
 struct StatusView: View {
     let appState: AppState
 
     var body: some View {
-        Image(systemName: appState.statusIconName)
+        Label(appState.statusLabel, systemImage: appState.statusIconName)
             .symbolRenderingMode(.monochrome)
             .foregroundStyle(appState.statusIconColor)
     }
