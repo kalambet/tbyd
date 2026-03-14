@@ -45,7 +45,10 @@ func TestExtractFromFeedback_PositiveScore(t *testing.T) {
 	}
 	extractor := NewPreferenceExtractor(chatter, "test-model")
 
-	signals := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "Good")
+	signals, err := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "Good")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(signals) != 1 {
 		t.Fatalf("expected 1 signal, got %d", len(signals))
@@ -64,7 +67,10 @@ func TestExtractFromFeedback_NegativeScore(t *testing.T) {
 	}
 	extractor := NewPreferenceExtractor(chatter, "test-model")
 
-	signals := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), -1, "Too long")
+	signals, err := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), -1, "Too long")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if len(signals) != 1 {
 		t.Fatalf("expected 1 signal, got %d", len(signals))
@@ -81,7 +87,7 @@ func TestExtractFromFeedback_UsesOriginalQueryOnly(t *testing.T) {
 	extractor := NewPreferenceExtractor(chatter, "test-model")
 
 	interaction := newTestInteraction()
-	extractor.ExtractFromFeedback(context.Background(), interaction, 1, "")
+	_, _ = extractor.ExtractFromFeedback(context.Background(), interaction, 1, "")
 
 	// Verify EnrichedPrompt does NOT appear in any message sent to the LLM.
 	for _, msg := range chatter.capturedMessages {
@@ -109,8 +115,11 @@ func TestExtractFromFeedback_LLMFails(t *testing.T) {
 	}
 	extractor := NewPreferenceExtractor(chatter, "test-model")
 
-	signals := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "")
+	signals, err := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "")
 
+	if err == nil {
+		t.Fatal("expected error on LLM failure, got nil")
+	}
 	if signals != nil {
 		t.Errorf("expected nil signals on LLM failure, got %v", signals)
 	}
@@ -122,8 +131,11 @@ func TestExtractFromFeedback_MalformedLLMResponse(t *testing.T) {
 	}
 	extractor := NewPreferenceExtractor(chatter, "test-model")
 
-	signals := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "")
+	signals, err := extractor.ExtractFromFeedback(context.Background(), newTestInteraction(), 1, "")
 
+	if err == nil {
+		t.Fatal("expected error on malformed response, got nil")
+	}
 	if signals != nil {
 		t.Errorf("expected nil signals on malformed response, got %v", signals)
 	}

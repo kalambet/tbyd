@@ -4,7 +4,13 @@ import (
 	"strings"
 
 	"github.com/kalambet/tbyd/internal/profile"
+	"github.com/kalambet/tbyd/internal/storage"
 )
+
+// SignalCountReader provides read access to aggregated signal counts.
+type SignalCountReader interface {
+	GetSignalCounts() ([]storage.SignalCount, error)
+}
 
 // Activation thresholds for preference signals. A pattern is activated when
 // EITHER the count rule OR the net score rule fires.
@@ -93,4 +99,29 @@ func Aggregate(signals []PreferenceSignal) profile.ProfileDelta {
 	}
 
 	return delta
+}
+
+// AggregateFromCounts reads pre-computed per-pattern signal counts from storage
+// and applies the shared activation rules. This is the production aggregation
+// path used by the FeedbackWorker — O(distinct patterns), not O(interactions).
+func AggregateFromCounts(reader SignalCountReader) (profile.ProfileDelta, error) {
+	counts, err := reader.GetSignalCounts()
+	if err != nil {
+		return profile.ProfileDelta{}, err
+	}
+
+	var delta profile.ProfileDelta
+	for _, c := range counts {
+		shouldAdd, shouldRemove := ShouldActivate(c.PositiveCount, c.NegativeCount)
+
+		if shouldAdd && shouldRemove {
+			continue // true conflict
+		}
+		if shouldAdd {
+			delta.AddPreferences = append(delta.AddPreferences, c.PatternDisplay)
+		} else if shouldRemove {
+			delta.RemovePreferences = append(delta.RemovePreferences, c.PatternDisplay)
+		}
+	}
+	return delta, nil
 }

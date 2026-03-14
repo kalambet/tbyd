@@ -282,6 +282,20 @@ func (s *Store) GetInteractionsWithFeedback(limit int) ([]Interaction, error) {
 	return results, rows.Err()
 }
 
+// HasExtractedSignals reports whether the given interaction already has
+// non-empty extracted signals stored. Used for idempotency on job retry.
+func (s *Store) HasExtractedSignals(id string) (bool, error) {
+	var signals string
+	err := s.db.QueryRow(`SELECT extracted_signals FROM interactions WHERE id = ?`, id).Scan(&signals)
+	if err == sql.ErrNoRows {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return signals != "", nil
+}
+
 // UpdateExtractedSignals stores the JSON-encoded preference signals extracted
 // from a single interaction's feedback.
 func (s *Store) UpdateExtractedSignals(id string, signalsJSON string) error {

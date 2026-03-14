@@ -18,6 +18,7 @@ type FeedbackJobStore interface {
 	CompleteJob(id string) error
 	FailJob(id string, errMsg string) error
 	GetInteraction(id string) (storage.Interaction, error)
+	HasExtractedSignals(id string) (bool, error)
 	UpdateExtractedSignals(id string, signalsJSON string) error
 	IncrementSignalCount(patternKey, patternDisplay string, pos, neg int) error
 	GetSignalCounts() ([]storage.SignalCount, error)
@@ -120,35 +121,56 @@ func (w *FeedbackWorker) processJob(ctx context.Context, job *storage.Job) error
 		return fmt.Errorf("parsing feedback job payload: %w", err)
 	}
 
-	// Load only the triggering interaction (1 LLM call per job).
-	interaction, err := w.store.GetInteraction(payload.InteractionID)
+	// Idempotency check: if a previous attempt already extracted and persisted
+	// signals for this interaction, skip the LLM call and counting to avoid
+	// double-counting. Go straight to aggregation.
+	alreadyProcessed, err := w.store.HasExtractedSignals(payload.InteractionID)
 	if err != nil {
-		return fmt.Errorf("loading interaction %s: %w", payload.InteractionID, err)
+		return fmt.Errorf("checking existing signals for %s: %w", payload.InteractionID, err)
 	}
 
-	// Extract signals from this single interaction.
-	signals := w.extractor.ExtractFromFeedback(ctx, interaction, interaction.FeedbackScore, interaction.FeedbackNotes)
-
-	// Persist extracted signals on the interaction row (for auditability) and
-	// update the summary signal_counts table (for O(1) aggregation).
-	if len(signals) > 0 {
-		signalsJSON, err := json.Marshal(signals)
+	if !alreadyProcessed {
+		// Load only the triggering interaction (1 LLM call per job).
+		interaction, err := w.store.GetInteraction(payload.InteractionID)
 		if err != nil {
-			return fmt.Errorf("marshalling signals: %w", err)
-		}
-		if err := w.store.UpdateExtractedSignals(interaction.ID, string(signalsJSON)); err != nil {
-			return fmt.Errorf("storing extracted signals: %w", err)
+			return fmt.Errorf("loading interaction %s: %w", payload.InteractionID, err)
 		}
 
-		// Increment per-pattern counts in the summary table.
-		if err := w.persistSignalCounts(signals); err != nil {
-			return fmt.Errorf("persisting signal counts: %w", err)
+		// Extract signals — errors are propagated so the job is retried.
+		signals, err := w.extractor.ExtractFromFeedback(ctx, interaction, interaction.FeedbackScore, interaction.FeedbackNotes)
+		if err != nil {
+			return fmt.Errorf("extracting signals: %w", err)
+		}
+
+		// Persist extracted signals on the interaction row (for auditability
+		// and idempotency) and update the summary signal_counts table.
+		if len(signals) > 0 {
+			signalsJSON, err := json.Marshal(signals)
+			if err != nil {
+				return fmt.Errorf("marshalling signals: %w", err)
+			}
+			// Increment per-pattern counts BEFORE marking the interaction as
+			// processed. If counting fails midway, the interaction won't be
+			// marked and the entire extraction+counting retries from scratch.
+			if err := w.persistSignalCounts(signals); err != nil {
+				return fmt.Errorf("persisting signal counts: %w", err)
+			}
+			// Mark as processed last — this is the idempotency sentinel.
+			if err := w.store.UpdateExtractedSignals(interaction.ID, string(signalsJSON)); err != nil {
+				return fmt.Errorf("storing extracted signals: %w", err)
+			}
+		} else {
+			// No signals extracted — mark as processed with empty array so
+			// retries don't re-run the LLM call.
+			if err := w.store.UpdateExtractedSignals(interaction.ID, "[]"); err != nil {
+				return fmt.Errorf("marking interaction as processed: %w", err)
+			}
 		}
 	}
 
 	// Aggregate from the summary counts table — O(distinct patterns), not
 	// O(total interactions). Typically < 100 rows for a single user.
-	delta, err := w.aggregateFromCounts()
+	delta, err := AggregateFromCounts(w.store)
 	if err != nil {
 		return fmt.Errorf("aggregating signal counts: %w", err)
 	}
@@ -191,27 +213,3 @@ func (w *FeedbackWorker) persistSignalCounts(signals []PreferenceSignal) error {
 	return nil
 }
 
-// aggregateFromCounts reads the signal_counts summary table and applies the
-// shared activation rules via ShouldActivate. This avoids loading all
-// historical signal JSON into memory.
-func (w *FeedbackWorker) aggregateFromCounts() (profile.ProfileDelta, error) {
-	counts, err := w.store.GetSignalCounts()
-	if err != nil {
-		return profile.ProfileDelta{}, err
-	}
-
-	var delta profile.ProfileDelta
-	for _, c := range counts {
-		shouldAdd, shouldRemove := ShouldActivate(c.PositiveCount, c.NegativeCount)
-
-		if shouldAdd && shouldRemove {
-			continue // true conflict
-		}
-		if shouldAdd {
-			delta.AddPreferences = append(delta.AddPreferences, c.PatternDisplay)
-		} else if shouldRemove {
-			delta.RemovePreferences = append(delta.RemovePreferences, c.PatternDisplay)
-		}
-	}
-	return delta, nil
-}

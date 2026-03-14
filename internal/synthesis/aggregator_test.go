@@ -2,11 +2,9 @@ package synthesis
 
 import (
 	"errors"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/kalambet/tbyd/internal/profile"
+	"github.com/kalambet/tbyd/internal/storage"
 )
 
 // ============================================================
@@ -168,152 +166,88 @@ func TestAggregate_RemovesNegated(t *testing.T) {
 }
 
 // ============================================================
-// ApplyDelta tests — inline mock store (mirrors profile/manager_test.go)
+// AggregateFromCounts tests (production aggregation path)
 // ============================================================
 
-// synthMockStore is a minimal ProfileStore for use in ApplyDelta tests.
-type synthMockStore struct {
-	mu   sync.Mutex
-	data map[string]string
+// mockSignalCountReader implements SignalCountReader for testing.
+type mockSignalCountReader struct {
+	counts []storage.SignalCount
+	err    error
 }
 
-func newSynthMockStore() *synthMockStore {
-	return &synthMockStore{data: make(map[string]string)}
+func (m *mockSignalCountReader) GetSignalCounts() ([]storage.SignalCount, error) {
+	return m.counts, m.err
 }
 
-func (m *synthMockStore) SetProfileKey(key, value string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.data[key] = value
-	return nil
-}
-
-func (m *synthMockStore) GetProfileKey(key string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	v, ok := m.data[key]
-	if !ok {
-		return "", errors.New("not found")
+func TestAggregateFromCounts_Adds(t *testing.T) {
+	reader := &mockSignalCountReader{
+		counts: []storage.SignalCount{
+			{PatternKey: "concise", PatternDisplay: "user prefers concise responses", PositiveCount: 3, NegativeCount: 0},
+		},
 	}
-	return v, nil
-}
-
-func (m *synthMockStore) GetAllProfileKeys() (map[string]string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cp := make(map[string]string, len(m.data))
-	for k, v := range m.data {
-		cp[k] = v
-	}
-	return cp, nil
-}
-
-func (m *synthMockStore) DeleteProfileKey(key string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.data[key]; !ok {
-		return errors.New("not found")
-	}
-	delete(m.data, key)
-	return nil
-}
-
-// newTestManager creates a profile.Manager backed by synthMockStore.
-func newTestManager() (*profile.Manager, *synthMockStore) {
-	store := newSynthMockStore()
-	mgr := profile.NewManagerWithClock(store, &fixedClock{t: time.Now()}, time.Hour)
-	return mgr, store
-}
-
-// fixedClock returns a constant time (cache never expires in tests).
-type fixedClock struct{ t time.Time }
-
-func (c *fixedClock) Now() time.Time { return c.t }
-
-func TestApplyDelta_AddsPreferences(t *testing.T) {
-	mgr, _ := newTestManager()
-
-	delta := profile.ProfileDelta{
-		AddPreferences: []string{"concise responses", "use examples"},
-	}
-	if err := mgr.ApplyDelta(delta); err != nil {
-		t.Fatalf("ApplyDelta failed: %v", err)
-	}
-
-	p, err := mgr.GetProfile()
+	delta, err := AggregateFromCounts(reader)
 	if err != nil {
-		t.Fatalf("GetProfile failed: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.Preferences) != 2 {
-		t.Fatalf("expected 2 preferences, got %d: %v", len(p.Preferences), p.Preferences)
+	if len(delta.AddPreferences) != 1 {
+		t.Fatalf("expected 1 addition, got %v", delta.AddPreferences)
+	}
+	if delta.AddPreferences[0] != "user prefers concise responses" {
+		t.Errorf("unexpected addition: %q", delta.AddPreferences[0])
 	}
 }
 
-func TestApplyDelta_RemovesPreferences(t *testing.T) {
-	mgr, _ := newTestManager()
-
-	// Seed with two preferences.
-	if err := mgr.SetField("preferences", []string{"concise responses", "use examples"}); err != nil {
-		t.Fatalf("SetField failed: %v", err)
+func TestAggregateFromCounts_Removes(t *testing.T) {
+	reader := &mockSignalCountReader{
+		counts: []storage.SignalCount{
+			{PatternKey: "verbose", PatternDisplay: "user prefers verbose answers", PositiveCount: 0, NegativeCount: 3},
+		},
 	}
-
-	delta := profile.ProfileDelta{
-		RemovePreferences: []string{"concise responses"},
-	}
-	if err := mgr.ApplyDelta(delta); err != nil {
-		t.Fatalf("ApplyDelta failed: %v", err)
-	}
-
-	p, err := mgr.GetProfile()
+	delta, err := AggregateFromCounts(reader)
 	if err != nil {
-		t.Fatalf("GetProfile failed: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.Preferences) != 1 {
-		t.Fatalf("expected 1 preference, got %d: %v", len(p.Preferences), p.Preferences)
-	}
-	if p.Preferences[0] != "use examples" {
-		t.Errorf("unexpected remaining preference: %q", p.Preferences[0])
+	if len(delta.RemovePreferences) != 1 {
+		t.Fatalf("expected 1 removal, got %v", delta.RemovePreferences)
 	}
 }
 
-func TestApplyDelta_Idempotent(t *testing.T) {
-	mgr, _ := newTestManager()
-
-	delta := profile.ProfileDelta{
-		AddPreferences: []string{"concise responses"},
+func TestAggregateFromCounts_Conflict(t *testing.T) {
+	reader := &mockSignalCountReader{
+		counts: []storage.SignalCount{
+			{PatternKey: "markdown", PatternDisplay: "user prefers markdown", PositiveCount: 5, NegativeCount: 5},
+		},
 	}
-
-	// Apply the same delta twice.
-	if err := mgr.ApplyDelta(delta); err != nil {
-		t.Fatalf("first ApplyDelta failed: %v", err)
-	}
-	if err := mgr.ApplyDelta(delta); err != nil {
-		t.Fatalf("second ApplyDelta failed: %v", err)
-	}
-
-	p, err := mgr.GetProfile()
+	delta, err := AggregateFromCounts(reader)
 	if err != nil {
-		t.Fatalf("GetProfile failed: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(p.Preferences) != 1 {
-		t.Fatalf("expected 1 preference after idempotent apply, got %d: %v", len(p.Preferences), p.Preferences)
+	if len(delta.AddPreferences) != 0 || len(delta.RemovePreferences) != 0 {
+		t.Errorf("expected no changes on conflict, got add=%v remove=%v", delta.AddPreferences, delta.RemovePreferences)
 	}
 }
 
-func TestApplyDelta_InvalidatesCache(t *testing.T) {
-	mgr, _ := newTestManager()
-
-	invalidated := false
-	mgr.OnInvalidate(func() { invalidated = true })
-
-	delta := profile.ProfileDelta{
-		AddPreferences: []string{"some preference"},
+func TestAggregateFromCounts_BelowThreshold(t *testing.T) {
+	reader := &mockSignalCountReader{
+		counts: []storage.SignalCount{
+			{PatternKey: "bullets", PatternDisplay: "user prefers bullet points", PositiveCount: 1, NegativeCount: 0},
+		},
 	}
-	if err := mgr.ApplyDelta(delta); err != nil {
-		t.Fatalf("ApplyDelta failed: %v", err)
+	delta, err := AggregateFromCounts(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(delta.AddPreferences) != 0 || len(delta.RemovePreferences) != 0 {
+		t.Errorf("expected no changes below threshold, got add=%v remove=%v", delta.AddPreferences, delta.RemovePreferences)
+	}
+}
 
-	if !invalidated {
-		t.Error("expected onInvalidate callback to be called after ApplyDelta")
+func TestAggregateFromCounts_StorageError(t *testing.T) {
+	reader := &mockSignalCountReader{
+		err: errors.New("database locked"),
+	}
+	_, err := AggregateFromCounts(reader)
+	if err == nil {
+		t.Fatal("expected error from storage, got nil")
 	}
 }
