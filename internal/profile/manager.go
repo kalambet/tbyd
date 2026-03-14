@@ -395,6 +395,112 @@ func deleteFromJSON(raw, selector string) (string, error) {
 	}
 }
 
+// ApplyDelta applies a ProfileDelta to the user profile in two phases:
+//
+//  1. Preferences phase: AddPreferences and RemovePreferences are applied as a
+//     single atomic read-modify-write under the write lock. No concurrent
+//     SetField or DeleteField can interleave with this phase.
+//  2. UpdateFields phase: each key/value pair is written via SetField, which
+//     acquires and releases the lock per call. Another writer could interleave
+//     between individual field updates, but each field write is itself atomic.
+//     This matches how the rest of the profile package operates.
+//
+// The two phases are NOT jointly atomic — a concurrent writer could observe
+// the preferences change before UpdateFields are applied. This is acceptable
+// because the synthesis pipeline only uses AddPreferences/RemovePreferences
+// today, and UpdateFields entries are independent key-value pairs with no
+// cross-field invariants.
+func (m *Manager) ApplyDelta(delta ProfileDelta) error {
+	// --- preferences (AddPreferences + RemovePreferences) ---
+	if len(delta.AddPreferences) > 0 || len(delta.RemovePreferences) > 0 {
+		if err := m.applyPreferencesDelta(delta); err != nil {
+			return err
+		}
+	}
+
+	// --- UpdateFields ---
+	// Each call to SetField acquires the write lock independently, matching the
+	// behaviour of all other callers of SetField.
+	for key, value := range delta.UpdateFields {
+		if err := m.SetField(key, value); err != nil {
+			return fmt.Errorf("applying delta field %q: %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+// applyPreferencesDelta holds the write lock for the full read-modify-write
+// cycle on the preferences array, preventing TOCTOU races within this process.
+//
+// Note: this mutex is process-local. tbyd is designed as a single-user,
+// single-process local tool backed by SQLite (which enforces single-writer at
+// the database level). Multi-replica horizontal scaling is not a supported
+// deployment model. If that ever changes, this would need a database-level
+// advisory lock or compare-and-swap on a version column.
+func (m *Manager) applyPreferencesDelta(delta ProfileDelta) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keys, err := m.store.GetAllProfileKeys()
+	if err != nil {
+		return fmt.Errorf("loading profile keys: %w", err)
+	}
+
+	var prefs []string
+	if raw, ok := keys["preferences"]; ok {
+		if jsonErr := json.Unmarshal([]byte(raw), &prefs); jsonErr != nil {
+			slog.Warn("malformed preferences key, treating as empty", "error", jsonErr)
+			prefs = nil
+		}
+	}
+
+	// Build a set of existing preferences for O(1) lookup.
+	existing := make(map[string]struct{}, len(prefs))
+	for _, p := range prefs {
+		existing[p] = struct{}{}
+	}
+
+	// Add new preferences (idempotent).
+	for _, add := range delta.AddPreferences {
+		if _, ok := existing[add]; !ok {
+			prefs = append(prefs, add)
+			existing[add] = struct{}{}
+		}
+	}
+
+	// Remove preferences.
+	if len(delta.RemovePreferences) > 0 {
+		removeSet := make(map[string]struct{}, len(delta.RemovePreferences))
+		for _, r := range delta.RemovePreferences {
+			removeSet[r] = struct{}{}
+		}
+		filtered := prefs[:0]
+		for _, p := range prefs {
+			if _, remove := removeSet[p]; !remove {
+				filtered = append(filtered, p)
+			}
+		}
+		prefs = filtered
+	}
+
+	b, err := json.Marshal(prefs)
+	if err != nil {
+		return fmt.Errorf("marshalling preferences: %w", err)
+	}
+
+	if setErr := m.store.SetProfileKey("preferences", string(b)); setErr != nil {
+		return fmt.Errorf("setting profile key \"preferences\": %w", setErr)
+	}
+
+	m.cached = nil
+	m.profileVersion++
+	if m.onInvalidate != nil {
+		m.onInvalidate()
+	}
+	return nil
+}
+
 // ProfileVersion returns the current profile version. It is a monotonically
 // increasing counter bumped on each SetField call. Used by the enrichment
 // pipeline to detect stale cache entries produced with an outdated profile.
