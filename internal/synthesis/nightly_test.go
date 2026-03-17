@@ -191,13 +191,11 @@ func TestRun_ContextCancellation(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil || !errors.Is(err, context.Canceled) {
-			// Either context.Canceled or a wrapped cancellation error is acceptable.
-			// Some callers wrap: "LLM synthesis call: context canceled".
-			// Allow any non-nil error that propagates cancellation.
-			if err == nil {
-				t.Error("Run() = nil, want context cancellation error")
-			}
+		if err == nil {
+			t.Fatal("Run() = nil, want context cancellation error")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Run() error = %v, want context.Canceled (or wrapping it)", err)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run() did not exit after context cancellation within 3s")

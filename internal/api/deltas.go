@@ -44,25 +44,32 @@ func handleAcceptDelta(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
+		// rollback unreview helper — on any failure after ReviewDelta, reset so
+		// the delta reappears in the pending list and the user can retry.
+		rollback := func(opErr error) {
+			if rbErr := deps.Store.UnreviewDelta(id); rbErr != nil {
+				slog.Error("failed to roll back delta review",
+					"delta_id", id, "op_error", opErr, "rollback_error", rbErr)
+			}
+		}
+
 		// Now fetch the delta to apply it.
 		delta, err := deps.Store.GetPendingDelta(id)
 		if err != nil {
+			rollback(err)
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to get pending delta: %v", err)
 			return
 		}
 
 		var profileDelta profile.ProfileDelta
 		if err := json.Unmarshal([]byte(delta.DeltaJSON), &profileDelta); err != nil {
+			rollback(err)
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to parse delta JSON: %v", err)
 			return
 		}
 
 		if err := deps.Profile.ApplyDelta(profileDelta); err != nil {
-			// Roll back the review so the user can retry.
-			if rbErr := deps.Store.UnreviewDelta(id); rbErr != nil {
-				slog.Error("failed to roll back delta review after apply failure",
-					"delta_id", id, "apply_error", err, "rollback_error", rbErr)
-			}
+			rollback(err)
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to apply delta: %v", err)
 			return
 		}

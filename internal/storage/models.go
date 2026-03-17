@@ -52,11 +52,11 @@ type ContextDoc struct {
 // human review. It is produced by background synthesis jobs and reviewed via
 // the management API.
 type PendingProfileDelta struct {
-	ID          string
-	DeltaJSON   string
-	Description string
-	Source      string     // "nightly_synthesis" | "feedback_aggregation"
-	Accepted    *bool      // nil = not reviewed
-	ReviewedAt  *time.Time
-	CreatedAt   time.Time
+	ID          string     `json:"id"`
+	DeltaJSON   string     `json:"delta_json"`
+	Description string     `json:"description"`
+	Source      string     `json:"source"`       // "nightly_synthesis" | "feedback_aggregation"
+	Accepted    *bool      `json:"accepted"`     // nil = not reviewed
+	ReviewedAt  *time.Time `json:"reviewed_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }

@@ -185,6 +185,12 @@ func (s *NightlySynthesizer) Run(ctx context.Context) error {
 	resp.RemovePreferences = sanitizePreferences(resp.RemovePreferences)
 	resp.UpdateFields = sanitizeUpdateFields(resp.UpdateFields)
 
+	// Skip saving if the LLM produced no actionable changes.
+	if len(resp.AddPreferences) == 0 && len(resp.RemovePreferences) == 0 && len(resp.UpdateFields) == 0 {
+		s.logger.Info("nightly_synthesis: LLM returned no changes, skipping delta")
+		return nil
+	}
+
 	// Build the ProfileDelta and serialize it for storage.
 	delta := profile.ProfileDelta{
 		AddPreferences:    resp.AddPreferences,
@@ -283,14 +289,11 @@ func buildSynthesisPrompt(interactions []storage.Interaction, docs []storage.Con
 		b = append(b, "None.\n"...)
 	} else {
 		for _, d := range docs {
-			snippet := d.Content
-			if len(snippet) > 300 {
-				snippet = snippet[:300] + "..."
-			}
+			snippet := truncateUTF8(escapeTag(d.Content), maxFieldBytes)
 			title := truncateUTF8(escapeTag(d.Title), maxFieldBytes)
 			source := truncateUTF8(escapeTag(d.Source), maxFieldBytes)
 			b = fmt.Appendf(b, "Title: <user_content>%s</user_content>\nSource: <user_content>%s</user_content>\nContent snippet: <user_content>%s</user_content>\n\n",
-				title, source, escapeTag(snippet))
+				title, source, snippet)
 		}
 	}
 
@@ -402,26 +405,28 @@ func (s *NightlySynthesizer) Schedule(ctx context.Context, interval time.Duratio
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	enqueue := func() {
+		job := storage.Job{
+			ID:          uuid.New().String(),
+			Type:        nightlySynthesisJobType,
+			PayloadJSON: "{}",
+		}
+		if err := s.store.EnqueueJob(ctx, job); err != nil {
+			s.logger.Error("nightly_synthesis: failed to enqueue job", "error", err)
+		} else {
+			s.logger.Info("nightly_synthesis: job enqueued")
+		}
+	}
+
 	// Fire immediately so a daily-restarted server doesn't miss the window.
-	fire := make(chan struct{}, 1)
-	fire <- struct{}{}
+	enqueue()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-fire:
 		case <-ticker.C:
-			job := storage.Job{
-				ID:          uuid.New().String(),
-				Type:        nightlySynthesisJobType,
-				PayloadJSON: "{}",
-			}
-			if err := s.store.EnqueueJob(ctx, job); err != nil {
-				s.logger.Error("nightly_synthesis: failed to enqueue job", "error", err)
-			} else {
-				s.logger.Info("nightly_synthesis: job enqueued")
-			}
+			enqueue()
 		}
 	}
 }
