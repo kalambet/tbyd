@@ -35,7 +35,7 @@ func TestExtract_RecallIntent(t *testing.T) {
 		response: `{"intent_type":"recall","entities":["database schema"],"topics":["architecture","decisions"],"context_needs":["past_decisions"],"is_private":false}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	got := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "")
+	got := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "", profile.CalibrationContext{})
 
 	want := Intent{
 		IntentType:   "recall",
@@ -54,7 +54,7 @@ func TestExtract_TaskIntent(t *testing.T) {
 		response: `{"intent_type":"task","entities":["CI pipeline"],"topics":["devops","automation"],"context_needs":["project_config"],"is_private":false}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	got := e.Extract(context.Background(), "set up CI for the project", nil, "")
+	got := e.Extract(context.Background(), "set up CI for the project", nil, "", profile.CalibrationContext{})
 
 	want := Intent{
 		IntentType:   "task",
@@ -73,7 +73,7 @@ func TestExtract_MalformedJSON(t *testing.T) {
 		response: `not valid json {{{`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	intent := e.Extract(context.Background(), "some query", nil, "")
+	intent := e.Extract(context.Background(), "some query", nil, "", profile.CalibrationContext{})
 
 	if intent.IntentType != "" {
 		t.Errorf("IntentType = %q, want zero value", intent.IntentType)
@@ -88,7 +88,7 @@ func TestExtract_Timeout(t *testing.T) {
 	e := NewExtractor(mock, "phi3.5", nil)
 
 	start := time.Now()
-	intent := e.Extract(context.Background(), "query", nil, "")
+	intent := e.Extract(context.Background(), "query", nil, "", profile.CalibrationContext{})
 	elapsed := time.Since(start)
 
 	if elapsed > 3500*time.Millisecond {
@@ -104,7 +104,7 @@ func TestExtract_OllamaDown(t *testing.T) {
 		err: fmt.Errorf("connection refused"),
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	intent := e.Extract(context.Background(), "hello", nil, "")
+	intent := e.Extract(context.Background(), "hello", nil, "", profile.CalibrationContext{})
 
 	if intent.IntentType != "" {
 		t.Errorf("IntentType = %q, want zero value on error", intent.IntentType)
@@ -116,7 +116,7 @@ func TestExtract_PrivateFlag(t *testing.T) {
 		response: `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":true}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	intent := e.Extract(context.Background(), "what is my SSN", nil, "")
+	intent := e.Extract(context.Background(), "what is my SSN", nil, "", profile.CalibrationContext{})
 
 	if !intent.IsPrivate {
 		t.Error("IsPrivate = false, want true")
@@ -128,7 +128,7 @@ func TestExtract_EmptyQuery(t *testing.T) {
 		response: `{"intent_type":"question"}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	intent := e.Extract(context.Background(), "", nil, "")
+	intent := e.Extract(context.Background(), "", nil, "", profile.CalibrationContext{})
 
 	if intent.IntentType != "" {
 		t.Errorf("IntentType = %q, want zero value for empty query", intent.IntentType)
@@ -140,7 +140,7 @@ func TestExtract_SearchStrategy(t *testing.T) {
 		response: `{"intent_type":"recall","entities":["Kubernetes"],"topics":["devops"],"context_needs":["docs"],"is_private":false,"search_strategy":"hybrid","hybrid_ratio":0.6,"suggested_top_k":10}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	got := e.Extract(context.Background(), "find docs about Kubernetes", nil, "")
+	got := e.Extract(context.Background(), "find docs about Kubernetes", nil, "", profile.CalibrationContext{})
 
 	if got.SearchStrategy != "hybrid" {
 		t.Errorf("SearchStrategy = %q, want %q", got.SearchStrategy, "hybrid")
@@ -159,7 +159,7 @@ func TestExtract_DefaultStrategy(t *testing.T) {
 		response: `{"intent_type":"question","entities":[],"topics":[],"context_needs":[],"is_private":false}`,
 	}
 	e := NewExtractor(mock, "phi3.5", nil)
-	got := e.Extract(context.Background(), "how does Go handle concurrency", nil, "")
+	got := e.Extract(context.Background(), "how does Go handle concurrency", nil, "", profile.CalibrationContext{})
 
 	if got.SearchStrategy != "" {
 		t.Errorf("SearchStrategy = %q, want empty (default)", got.SearchStrategy)
@@ -185,7 +185,7 @@ func TestExtract_WithCalibration(t *testing.T) {
 
 	calibration := profile.CalibrationContext{Hints: "User is an expert Go developer."}
 	e := NewExtractor(capturingMock, "phi3.5", func() profile.CalibrationContext { return calibration })
-	e.Extract(context.Background(), "how do goroutines work", nil, "")
+	e.Extract(context.Background(), "how do goroutines work", nil, "", profile.CalibrationContext{})
 
 	if len(capturedMessages) == 0 {
 		t.Fatal("no messages captured")

@@ -335,6 +335,9 @@ func TestCompose_ExplicitPreferencesCapEnforced(t *testing.T) {
 
 	// 3. Chunks are truncated, not preferences — no chunk content should appear
 	//    given the tight budget after preferences.
+	if strings.Contains(sysContent, "[Retrieved Context]") {
+		t.Error("expected [Retrieved Context] section to be absent when budget is exceeded by fixed content")
+	}
 }
 
 func TestCompose_ExplicitSectionBeforeContext(t *testing.T) {
@@ -367,7 +370,7 @@ func TestCompose_ExplicitSectionBeforeContext(t *testing.T) {
 	}
 }
 
-func TestCompose_InferredPreferencesMayBeTruncated(t *testing.T) {
+func TestCompose_ChunksTruncatedWhenBudgetExceeded(t *testing.T) {
 	// Budget large enough for explicit prefs and profile, but tight for chunks.
 	c := New(100)
 	req := makeRequest(t, map[string]string{"role": "user", "content": "q"})

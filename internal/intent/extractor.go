@@ -51,7 +51,11 @@ func NewExtractor(client OllamaChatter, model string, calibrationProvider Calibr
 // Extract analyses the query and recent history, returning a structured Intent.
 // On any failure (timeout, malformed JSON, Ollama error) it returns a zero-value
 // Intent — the enrichment pipeline must not block on extraction failures.
-func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []ollama.Message, profileSummary string) Intent {
+//
+// calibration is optional: if non-zero it is used directly; otherwise the
+// CalibrationProvider (if set) is called. This lets callers that already hold
+// the profile avoid a redundant storage round-trip.
+func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []ollama.Message, profileSummary string, calibration profile.CalibrationContext) Intent {
 	if query == "" {
 		return Intent{}
 	}
@@ -59,8 +63,7 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []o
 	ctx, cancel := context.WithTimeout(ctx, extractionTimeout)
 	defer cancel()
 
-	var calibration profile.CalibrationContext
-	if e.calibrationProvider != nil {
+	if calibration.Hints == "" && e.calibrationProvider != nil {
 		calibration = e.calibrationProvider()
 	}
 	messages := BuildPrompt(query, recentHistory, profileSummary, calibration)

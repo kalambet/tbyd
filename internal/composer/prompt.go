@@ -8,6 +8,7 @@ import (
 
 	"github.com/kalambet/tbyd/internal/proxy"
 	"github.com/kalambet/tbyd/internal/retrieval"
+	"github.com/kalambet/tbyd/internal/sanitize"
 )
 
 const defaultMaxContextTokens = 4000
@@ -89,7 +90,7 @@ func (c *Composer) buildEnrichment(chunks []retrieval.ContextChunk, explicitPref
 		used := 0
 		for _, pref := range explicitPrefs {
 			// Strip newlines to prevent section-boundary injection.
-			pref = strings.ReplaceAll(strings.ReplaceAll(pref, "\n", " "), "\r", " ")
+			pref = sanitize.ForPrompt(pref)
 			line := "- " + pref + "\n"
 			t := EstimateTokens(line)
 			if used+t > explicitPrefsTokenCap {

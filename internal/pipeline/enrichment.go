@@ -133,8 +133,15 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		profileSummary = e.profile.SummarizeProfile(p)
 	}
 
-	// Extract intent — pass profile summary for better domain-aware extraction.
-	extracted := e.extractor.Extract(ctx, lastUserMsg, nil, profileSummary)
+	// Derive calibration from the already-loaded profile to avoid a redundant
+	// storage round-trip through the CalibrationProvider.
+	var calibration profile.CalibrationContext
+	if profileLoaded {
+		calibration = e.profile.BuildCalibration(p)
+	}
+
+	// Extract intent — pass profile summary and calibration for domain-aware extraction.
+	extracted := e.extractor.Extract(ctx, lastUserMsg, nil, profileSummary, calibration)
 	if extracted.IntentType != "" {
 		meta.IntentExtracted = true
 	}

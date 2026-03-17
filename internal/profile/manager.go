@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/kalambet/tbyd/internal/sanitize"
 )
 
 // ErrFieldNotFound is returned when a profile field path does not exist.
@@ -560,17 +562,21 @@ func (m *Manager) SummarizeProfile(p Profile) string {
 	return summarize(p)
 }
 
-// GetCalibrationContext builds a CalibrationContext from the user's expertise
-// map. The hints paragraph is suitable for injection into the intent extraction
-// system prompt to steer the model toward domain-appropriate intent tags.
+// GetCalibrationContext loads the current profile and builds a CalibrationContext.
 func (m *Manager) GetCalibrationContext() (CalibrationContext, error) {
 	p, err := m.GetProfile()
 	if err != nil {
 		return CalibrationContext{}, fmt.Errorf("getting profile for calibration: %w", err)
 	}
+	return m.BuildCalibration(p), nil
+}
 
+// BuildCalibration derives a CalibrationContext from a pre-loaded Profile.
+// Use this instead of GetCalibrationContext when the caller already holds
+// the profile to avoid a redundant storage round-trip.
+func (m *Manager) BuildCalibration(p Profile) CalibrationContext {
 	if len(p.Identity.Expertise) == 0 {
-		return CalibrationContext{Hints: "No specific domain expertise configured."}, nil
+		return CalibrationContext{Hints: "No specific domain expertise configured."}
 	}
 
 	domains := make([]string, 0, len(p.Identity.Expertise))
@@ -581,12 +587,12 @@ func (m *Manager) GetCalibrationContext() (CalibrationContext, error) {
 
 	var sentences []string
 	for _, domain := range domains {
-		level := sanitizeForPrompt(p.Identity.Expertise[domain])
-		domain = sanitizeForPrompt(domain)
+		level := sanitize.ForPrompt(p.Identity.Expertise[domain])
+		domain = sanitize.ForPrompt(domain)
 		sentences = append(sentences, fmt.Sprintf("User has %s expertise in %s.", level, domain))
 	}
 
-	return CalibrationContext{Hints: strings.Join(sentences, " ")}, nil
+	return CalibrationContext{Hints: strings.Join(sentences, " ")}
 }
 
 // maxSummaryChars caps the summary to stay under ~500 tokens.
@@ -672,13 +678,6 @@ func summarize(p Profile) string {
 		}
 	}
 	return summary
-}
-
-// sanitizeForPrompt strips characters that could escape a prompt section boundary.
-func sanitizeForPrompt(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\r", " ")
-	return s
 }
 
 func deepCopyProfile(p *Profile) Profile {
