@@ -74,7 +74,7 @@ func TestBatchDocuments_SplitsIntoBatches(t *testing.T) {
 	for i, batch := range batches {
 		total := 0
 		for _, doc := range batch {
-			total += EstimateTokens(doc.Content)
+			total += estimateDocTokens(doc)
 		}
 		if total > effective && len(batch) > 1 {
 			t.Errorf("batch %d token count %d exceeds effective limit %d (multi-doc batch)", i, total, effective)

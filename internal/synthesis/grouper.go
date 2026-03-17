@@ -52,6 +52,9 @@ func GroupByTopics(docs []storage.ContextDoc) [][]storage.ContextDoc {
 	}
 
 	// Merge docs that share sufficient topic overlap.
+	// NOTE: O(n^2) pairwise comparison. Acceptable for the current deep enrichment
+	// batch claim limit (default 5000). If this grows significantly, consider an
+	// inverted-index approach to avoid exhaustive comparison.
 	for i := 0; i < len(entries); i++ {
 		for j := i + 1; j < len(entries); j++ {
 			if len(entries[i].topics) == 0 || len(entries[j].topics) == 0 {

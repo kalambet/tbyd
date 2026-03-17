@@ -62,7 +62,7 @@ func (defaultStatsProvider) AvailableMemoryGB() (float64, error) {
 	defer cancel()
 
 	// Get page size via sysctl.
-	pageSizeOut, err := exec.CommandContext(ctx, "sysctl", "-n", "hw.pagesize").Output()
+	pageSizeOut, err := exec.CommandContext(ctx, "/usr/sbin/sysctl", "-n", "hw.pagesize").Output()
 	if err != nil {
 		return 0, fmt.Errorf("running sysctl hw.pagesize: %w", err)
 	}
@@ -71,20 +71,35 @@ func (defaultStatsProvider) AvailableMemoryGB() (float64, error) {
 		return 0, fmt.Errorf("parsing page size %q: %w", string(pageSizeOut), err)
 	}
 
-	vmOut, err := exec.CommandContext(ctx, "vm_stat").Output()
+	vmOut, err := exec.CommandContext(ctx, "/usr/bin/vm_stat").Output()
 	if err != nil {
 		return 0, fmt.Errorf("running vm_stat: %w", err)
 	}
 
 	var freePages, inactivePages int64
+	var foundFields int
 	for _, line := range bytes.Split(vmOut, []byte("\n")) {
 		s := strings.TrimSpace(string(line))
 		switch {
 		case strings.HasPrefix(s, "Pages free:"):
-			freePages = parseVMStatPages(s)
+			pages, parseErr := parseVMStatPages(s)
+			if parseErr != nil {
+				return 0, fmt.Errorf("parsing Pages free: %w", parseErr)
+			}
+			freePages = pages
+			foundFields++
 		case strings.HasPrefix(s, "Pages inactive:"):
-			inactivePages = parseVMStatPages(s)
+			pages, parseErr := parseVMStatPages(s)
+			if parseErr != nil {
+				return 0, fmt.Errorf("parsing Pages inactive: %w", parseErr)
+			}
+			inactivePages = pages
+			foundFields++
 		}
+	}
+
+	if foundFields == 0 {
+		return 0, fmt.Errorf("vm_stat output contained no recognised memory fields")
 	}
 
 	availableBytes := (freePages + inactivePages) * pageSize
@@ -94,13 +109,16 @@ func (defaultStatsProvider) AvailableMemoryGB() (float64, error) {
 
 // parseVMStatPages extracts the trailing page count from a vm_stat line.
 // e.g. "Pages free:          12345." → 12345
-func parseVMStatPages(line string) int64 {
+func parseVMStatPages(line string) (int64, error) {
 	idx := strings.LastIndex(line, ":")
 	if idx < 0 {
-		return 0
+		return 0, fmt.Errorf("no colon in vm_stat line %q", line)
 	}
 	raw := strings.TrimSpace(line[idx+1:])
 	raw = strings.TrimSuffix(raw, ".")
-	v, _ := strconv.ParseInt(raw, 10, 64)
-	return v
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing page count from %q: %w", line, err)
+	}
+	return v, nil
 }

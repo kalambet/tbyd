@@ -252,7 +252,7 @@ func runServer() error {
 		if h, err := parseScheduleHour(cfg.Enrichment.DeepSchedule); err == nil {
 			scheduledHour = h
 		} else {
-			slog.Warn("invalid deep enrichment schedule, defaulting to 02:00 UTC",
+			slog.Info("invalid deep enrichment schedule, defaulting to 02:00 UTC",
 				"schedule", cfg.Enrichment.DeepSchedule, "error", err)
 		}
 		go deepWorker.Schedule(ctx, 5*time.Minute, scheduledHour)

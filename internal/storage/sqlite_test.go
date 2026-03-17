@@ -703,3 +703,234 @@ func TestFailJob_SetsBackoff(t *testing.T) {
 		t.Errorf("run_after %v should be after %v", runAfter, before)
 	}
 }
+
+// --- Tests for deep enrichment storage methods ---
+
+func TestUpdateContextDocTagsAndDeepMetadata(t *testing.T) {
+	s := openTestStore(t)
+
+	doc := ContextDoc{
+		ID:        "doc-deep-1",
+		Title:     "Test Doc",
+		Content:   "Some content",
+		Source:    "test",
+		Tags:      `["go"]`,
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := s.SaveContextDoc(doc); err != nil {
+		t.Fatalf("SaveContextDoc: %v", err)
+	}
+
+	newTags := `["go","concurrency","goroutines"]`
+	deepMeta := `{"enriched_topics":["concurrency"],"domain_classification":"engineering"}`
+	if err := s.UpdateContextDocTagsAndDeepMetadata("doc-deep-1", newTags, deepMeta); err != nil {
+		t.Fatalf("UpdateContextDocTagsAndDeepMetadata: %v", err)
+	}
+
+	got, err := s.GetContextDoc("doc-deep-1")
+	if err != nil {
+		t.Fatalf("GetContextDoc: %v", err)
+	}
+	if got.Tags != newTags {
+		t.Errorf("Tags = %q, want %q", got.Tags, newTags)
+	}
+	if got.DeepMetadata != deepMeta {
+		t.Errorf("DeepMetadata = %q, want %q", got.DeepMetadata, deepMeta)
+	}
+}
+
+func TestUpdateContextDocTagsAndDeepMetadata_NotFound(t *testing.T) {
+	s := openTestStore(t)
+
+	err := s.UpdateContextDocTagsAndDeepMetadata("nonexistent", "[]", "{}")
+	if err != ErrNotFound {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestClaimJobs_BulkClaim(t *testing.T) {
+	s := openTestStore(t)
+
+	// Enqueue 5 jobs.
+	for i := 0; i < 5; i++ {
+		job := Job{
+			ID:          fmt.Sprintf("j-bulk-%d", i),
+			Type:        "deep_enrich",
+			PayloadJSON: fmt.Sprintf(`{"doc_id":"d%d"}`, i),
+		}
+		if err := s.EnqueueJob(context.Background(), job); err != nil {
+			t.Fatalf("EnqueueJob %d: %v", i, err)
+		}
+	}
+
+	// Claim 3 of 5.
+	claimed, err := s.ClaimJobs([]string{"deep_enrich"}, 3)
+	if err != nil {
+		t.Fatalf("ClaimJobs: %v", err)
+	}
+	if len(claimed) != 3 {
+		t.Fatalf("claimed %d jobs, want 3", len(claimed))
+	}
+	for _, j := range claimed {
+		if j.Status != "running" {
+			t.Errorf("job %s status = %q, want %q", j.ID, j.Status, "running")
+		}
+	}
+
+	// Claim remaining 2.
+	remaining, err := s.ClaimJobs([]string{"deep_enrich"}, 10)
+	if err != nil {
+		t.Fatalf("ClaimJobs (remaining): %v", err)
+	}
+	if len(remaining) != 2 {
+		t.Errorf("remaining claimed %d jobs, want 2", len(remaining))
+	}
+
+	// No more to claim.
+	empty, err := s.ClaimJobs([]string{"deep_enrich"}, 10)
+	if err != nil {
+		t.Fatalf("ClaimJobs (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 jobs, got %d", len(empty))
+	}
+}
+
+func TestClaimJobs_TypeFilter(t *testing.T) {
+	s := openTestStore(t)
+
+	if err := s.EnqueueJob(context.Background(), Job{ID: "j-type-a", Type: "type_a", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if err := s.EnqueueJob(context.Background(), Job{ID: "j-type-b", Type: "type_b", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+
+	claimed, err := s.ClaimJobs([]string{"type_a"}, 10)
+	if err != nil {
+		t.Fatalf("ClaimJobs: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d jobs, want 1", len(claimed))
+	}
+	if claimed[0].Type != "type_a" {
+		t.Errorf("Type = %q, want %q", claimed[0].Type, "type_a")
+	}
+}
+
+func TestClaimJobs_EmptyInput(t *testing.T) {
+	s := openTestStore(t)
+
+	jobs, err := s.ClaimJobs(nil, 10)
+	if err != nil {
+		t.Fatalf("ClaimJobs(nil): %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("expected 0 jobs for nil types, got %d", len(jobs))
+	}
+
+	jobs, err = s.ClaimJobs([]string{"x"}, 0)
+	if err != nil {
+		t.Fatalf("ClaimJobs(limit=0): %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("expected 0 jobs for limit=0, got %d", len(jobs))
+	}
+}
+
+func TestResetStaleJobs_ResetsToRetry(t *testing.T) {
+	s := openTestStore(t)
+
+	// Enqueue and claim a job.
+	if err := s.EnqueueJob(context.Background(), Job{ID: "j-stale-1", Type: "deep_enrich", PayloadJSON: `{}`}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"deep_enrich"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+
+	// Artificially backdate the updated_at to simulate a stale job.
+	staleTime := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+	if _, err := s.db.Exec(`UPDATE jobs SET updated_at = ? WHERE id = 'j-stale-1'`, staleTime); err != nil {
+		t.Fatalf("backdating job: %v", err)
+	}
+
+	count, err := s.ResetStaleJobs([]string{"deep_enrich"}, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ResetStaleJobs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("reset count = %d, want 1", count)
+	}
+
+	// Job should be back to pending with attempts incremented.
+	var status string
+	var attempts int
+	if err := s.db.QueryRow(`SELECT status, attempts FROM jobs WHERE id = 'j-stale-1'`).Scan(&status, &attempts); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want %q", status, "pending")
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestResetStaleJobs_FailsOnMaxAttempts(t *testing.T) {
+	s := openTestStore(t)
+
+	// Enqueue with max_attempts=1.
+	if err := s.EnqueueJob(context.Background(), Job{ID: "j-stale-max", Type: "deep_enrich", PayloadJSON: `{}`, MaxAttempts: 1}); err != nil {
+		t.Fatalf("EnqueueJob: %v", err)
+	}
+	if _, err := s.ClaimNextJob([]string{"deep_enrich"}); err != nil {
+		t.Fatalf("ClaimNextJob: %v", err)
+	}
+
+	// Backdate.
+	staleTime := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
+	if _, err := s.db.Exec(`UPDATE jobs SET updated_at = ? WHERE id = 'j-stale-max'`, staleTime); err != nil {
+		t.Fatalf("backdating: %v", err)
+	}
+
+	count, err := s.ResetStaleJobs([]string{"deep_enrich"}, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ResetStaleJobs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("reset count = %d, want 1", count)
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM jobs WHERE id = 'j-stale-max'`).Scan(&status); err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("status = %q, want %q", status, "failed")
+	}
+}
+
+func TestResetStaleJobs_NoStaleJobs(t *testing.T) {
+	s := openTestStore(t)
+
+	count, err := s.ResetStaleJobs([]string{"deep_enrich"}, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ResetStaleJobs: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("reset count = %d, want 0", count)
+	}
+}
+
+func TestResetStaleJobs_EmptyTypes(t *testing.T) {
+	s := openTestStore(t)
+
+	count, err := s.ResetStaleJobs(nil, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("ResetStaleJobs(nil): %v", err)
+	}
+	if count != 0 {
+		t.Errorf("reset count = %d, want 0", count)
+	}
+}

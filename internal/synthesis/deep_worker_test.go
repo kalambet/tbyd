@@ -36,7 +36,7 @@ func (m *mockDeepStore) addJob(docID string) {
 		ID:          "job-" + docID,
 		Type:        deepEnrichJobType,
 		PayloadJSON: string(payload),
-		Status:      "running",
+		Status:      "pending",
 	})
 }
 

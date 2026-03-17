@@ -803,6 +803,8 @@ func (s *Store) UpdateContextDocTagsAndDeepMetadata(id, tags, deepMetadataJSON s
 }
 
 // ClaimJobs claims up to limit pending jobs of the given types in a single transaction.
+// The transaction is required: it ensures the SELECT + UPDATE pair is atomic so no
+// two workers can claim the same job (prevents double-processing on concurrent calls).
 // Returns the claimed jobs with status set to "running".
 func (s *Store) ClaimJobs(types []string, limit int) ([]Job, error) {
 	if len(types) == 0 || limit <= 0 {
