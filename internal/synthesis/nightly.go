@@ -397,14 +397,20 @@ func (s *NightlySynthesizer) ProcessJobs(ctx context.Context, pollInterval time.
 }
 
 // Schedule enqueues a nightly_synthesis job on the given interval. Exits when
-// ctx is cancelled.
+// ctx is cancelled. Fires immediately on startup, then on each tick.
 func (s *NightlySynthesizer) Schedule(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// Fire immediately so a daily-restarted server doesn't miss the window.
+	fire := make(chan struct{}, 1)
+	fire <- struct{}{}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-fire:
 		case <-ticker.C:
 			job := storage.Job{
 				ID:          uuid.New().String(),
