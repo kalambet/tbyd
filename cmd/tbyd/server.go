@@ -32,6 +32,7 @@ import (
 	"github.com/kalambet/tbyd/internal/reranking"
 	"github.com/kalambet/tbyd/internal/retrieval"
 	"github.com/kalambet/tbyd/internal/storage"
+	"github.com/kalambet/tbyd/internal/synthesis"
 )
 
 var startCmd = &cobra.Command{
@@ -214,6 +215,11 @@ func runServer() error {
 		slog.Warn("no model configured for interaction summarization; summaries will be skipped")
 	}
 	go worker.Run(ctx)
+
+	// Build and start feedback preference extraction worker.
+	prefExtractor := synthesis.NewPreferenceExtractor(engine.ChatAdapter(ollamaEngine), cfg.Ollama.DeepModel)
+	feedbackWorker := synthesis.NewFeedbackWorker(store, prefExtractor, profileMgr, 500*time.Millisecond)
+	go feedbackWorker.Run(ctx)
 
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)

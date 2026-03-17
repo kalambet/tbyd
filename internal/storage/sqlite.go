@@ -253,6 +253,145 @@ func (s *Store) GetRecentInteractions(limit int) ([]Interaction, error) {
 	return results, rows.Err()
 }
 
+// GetInteractionsWithFeedback returns interactions that have a non-zero
+// feedback score, ordered by most recent first, up to limit rows.
+func (s *Store) GetInteractionsWithFeedback(limit int) ([]Interaction, error) {
+	rows, err := s.db.Query(`
+		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids
+		FROM interactions WHERE feedback_score != 0 ORDER BY created_at DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Interaction
+	for rows.Next() {
+		var i Interaction
+		var createdAt string
+		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.Status, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		i.CreatedAt = t
+		results = append(results, i)
+	}
+	return results, rows.Err()
+}
+
+// HasExtractedSignals reports whether the given interaction already has
+// non-empty extracted signals stored. Used for idempotency on job retry.
+func (s *Store) HasExtractedSignals(id string) (bool, error) {
+	var signals string
+	err := s.db.QueryRow(`SELECT extracted_signals FROM interactions WHERE id = ?`, id).Scan(&signals)
+	if err == sql.ErrNoRows {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return signals != "", nil
+}
+
+// UpdateExtractedSignals stores the JSON-encoded preference signals extracted
+// from a single interaction's feedback.
+func (s *Store) UpdateExtractedSignals(id string, signalsJSON string) error {
+	res, err := s.db.Exec(`UPDATE interactions SET extracted_signals = ? WHERE id = ?`, signalsJSON, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SignalCountDelta holds the increments for a single pattern, used by PersistSignalsAtomically.
+type SignalCountDelta struct {
+	PatternKey     string
+	PatternDisplay string
+	Positive       int
+	Negative       int
+}
+
+// PersistSignalsAtomically increments signal counts and marks the interaction
+// as processed in a single transaction, preventing double-counting on retry.
+func (s *Store) PersistSignalsAtomically(interactionID string, signalsJSON string, counts []SignalCountDelta) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Increment each signal count.
+	for _, c := range counts {
+		_, err := tx.Exec(`
+			INSERT INTO signal_counts (pattern_key, pattern_display, positive_count, negative_count)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(pattern_key) DO UPDATE SET
+				positive_count = positive_count + excluded.positive_count,
+				negative_count = negative_count + excluded.negative_count`,
+			c.PatternKey, c.PatternDisplay, c.Positive, c.Negative,
+		)
+		if err != nil {
+			return fmt.Errorf("incrementing signal count for %q: %w", c.PatternKey, err)
+		}
+	}
+
+	// Mark interaction as processed.
+	res, err := tx.Exec(`UPDATE interactions SET extracted_signals = ? WHERE id = ?`, signalsJSON, interactionID)
+	if err != nil {
+		return fmt.Errorf("updating extracted signals: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	return tx.Commit()
+}
+
+// SignalCount holds the per-pattern aggregated counts from signal_counts.
+type SignalCount struct {
+	PatternKey     string
+	PatternDisplay string
+	PositiveCount  int
+	NegativeCount  int
+}
+
+// GetSignalCounts returns all rows from signal_counts. The result set size is
+// bounded by the number of distinct preference patterns (typically < 100 for a
+// single user), not by the total number of interactions.
+func (s *Store) GetSignalCounts() ([]SignalCount, error) {
+	rows, err := s.db.Query(`
+		SELECT pattern_key, pattern_display, positive_count, negative_count
+		FROM signal_counts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SignalCount
+	for rows.Next() {
+		var sc SignalCount
+		if err := rows.Scan(&sc.PatternKey, &sc.PatternDisplay, &sc.PositiveCount, &sc.NegativeCount); err != nil {
+			return nil, err
+		}
+		results = append(results, sc)
+	}
+	return results, rows.Err()
+}
+
 // --- User Profile ---
 
 func (s *Store) SetProfileKey(key, value string) error {

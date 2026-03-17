@@ -395,6 +395,143 @@ func deleteFromJSON(raw, selector string) (string, error) {
 	}
 }
 
+// ApplyDelta applies a ProfileDelta to the user profile in two phases:
+//
+//  1. Preferences phase: AddPreferences and RemovePreferences are applied as a
+//     single atomic read-modify-write under the write lock. No concurrent
+//     SetField or DeleteField can interleave with this phase.
+//  2. UpdateFields phase: all key/value pairs are written under a single
+//     write lock to avoid repeated lock cycling. No other writer can interleave
+//     between field updates within the same delta.
+//
+// The two phases are NOT jointly atomic — a concurrent writer could observe
+// the preferences change before UpdateFields are applied. This is acceptable
+// because the synthesis pipeline only uses AddPreferences/RemovePreferences
+// today, and UpdateFields entries are independent key-value pairs with no
+// cross-field invariants.
+//
+// onInvalidate is called at most once per ApplyDelta invocation, after all
+// writes are committed and all locks are released.
+func (m *Manager) ApplyDelta(delta ProfileDelta) error {
+	changed := false
+
+	// --- preferences (AddPreferences + RemovePreferences) ---
+	// applyPreferencesDelta holds m.mu.Lock() internally and does NOT call
+	// onInvalidate; we do that once at the end.
+	if len(delta.AddPreferences) > 0 || len(delta.RemovePreferences) > 0 {
+		if err := m.applyPreferencesDelta(delta); err != nil {
+			return err
+		}
+		changed = true
+	}
+
+	// --- UpdateFields ---
+	// Acquire the lock once for all field writes to avoid repeated lock
+	// cycling and to batch the cache invalidations into the single call below.
+	if len(delta.UpdateFields) > 0 {
+		m.mu.Lock()
+		for key, value := range delta.UpdateFields {
+			if err := m.setFieldNoInvalidate(key, value); err != nil {
+				m.mu.Unlock()
+				return fmt.Errorf("applying delta field %q: %w", key, err)
+			}
+		}
+		m.mu.Unlock()
+		changed = true
+	}
+
+	// Single cache invalidation after all changes, with no lock held.
+	if changed {
+		m.mu.RLock()
+		fn := m.onInvalidate
+		m.mu.RUnlock()
+		if fn != nil {
+			fn()
+		}
+	}
+
+	return nil
+}
+
+// applyPreferencesDelta holds the write lock for the full read-modify-write
+// cycle on the preferences array, preventing TOCTOU races within this process.
+//
+// Note: this mutex is process-local. tbyd is designed as a single-user,
+// single-process local tool backed by SQLite (which enforces single-writer at
+// the database level). Multi-replica horizontal scaling is not a supported
+// deployment model. If that ever changes, this would need a database-level
+// advisory lock or compare-and-swap on a version column.
+func (m *Manager) applyPreferencesDelta(delta ProfileDelta) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keys, err := m.store.GetAllProfileKeys()
+	if err != nil {
+		return fmt.Errorf("loading profile keys: %w", err)
+	}
+
+	var prefs []string
+	if raw, ok := keys["preferences"]; ok {
+		if jsonErr := json.Unmarshal([]byte(raw), &prefs); jsonErr != nil {
+			slog.Warn("malformed preferences key, treating as empty", "error", jsonErr)
+			prefs = nil
+		}
+	}
+
+	// Build a set of existing preferences for O(1) lookup.
+	existing := make(map[string]struct{}, len(prefs))
+	for _, p := range prefs {
+		existing[p] = struct{}{}
+	}
+
+	// Add new preferences (idempotent).
+	for _, add := range delta.AddPreferences {
+		if _, ok := existing[add]; !ok {
+			prefs = append(prefs, add)
+			existing[add] = struct{}{}
+		}
+	}
+
+	// Remove preferences.
+	if len(delta.RemovePreferences) > 0 {
+		removeSet := make(map[string]struct{}, len(delta.RemovePreferences))
+		for _, r := range delta.RemovePreferences {
+			removeSet[r] = struct{}{}
+		}
+		filtered := prefs[:0]
+		for _, p := range prefs {
+			if _, remove := removeSet[p]; !remove {
+				filtered = append(filtered, p)
+			}
+		}
+		prefs = filtered
+	}
+
+	b, err := json.Marshal(prefs)
+	if err != nil {
+		return fmt.Errorf("marshalling preferences: %w", err)
+	}
+
+	if setErr := m.store.SetProfileKey("preferences", string(b)); setErr != nil {
+		return fmt.Errorf("setting profile key \"preferences\": %w", setErr)
+	}
+
+	m.cached = nil
+	m.profileVersion++
+	return nil
+}
+
+// setFieldNoInvalidate persists a profile key, nils the cache, and bumps the
+// version, but does NOT call onInvalidate. The caller must hold m.mu.Lock().
+func (m *Manager) setFieldNoInvalidate(key string, value string) error {
+	if err := m.store.SetProfileKey(key, value); err != nil {
+		return fmt.Errorf("setting profile key %q: %w", key, err)
+	}
+	m.cached = nil
+	m.profileVersion++
+	return nil
+}
+
 // ProfileVersion returns the current profile version. It is a monotonically
 // increasing counter bumped on each SetField call. Used by the enrichment
 // pipeline to detect stale cache entries produced with an outdated profile.
