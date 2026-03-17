@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -322,16 +323,25 @@ func sanitizePreferences(prefs []string) []string {
 }
 
 // sanitizeUpdateFields caps the number and size of LLM-produced update fields.
+// Keys are sorted before truncation for deterministic output.
 func sanitizeUpdateFields(fields map[string]string) map[string]string {
 	if len(fields) == 0 {
 		return fields
 	}
+	// Sort keys so truncation is deterministic across runs.
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	result := make(map[string]string, min(len(fields), maxPreferences))
 	count := 0
-	for k, v := range fields {
+	for _, k := range keys {
 		if count >= maxPreferences {
 			break
 		}
+		v := fields[k]
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
 		if k == "" {
