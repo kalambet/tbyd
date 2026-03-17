@@ -613,6 +613,69 @@ func TestFailJob_MaxAttemptsReached(t *testing.T) {
 	}
 }
 
+func TestPersistSignalsAtomically_Success(t *testing.T) {
+	s := openTestStore(t)
+
+	// Create an interaction to update.
+	if err := s.SaveInteraction(context.Background(), Interaction{
+		ID:        "int-atomic",
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		UserQuery: "test query",
+		VectorIDs: "[]",
+	}); err != nil {
+		t.Fatalf("SaveInteraction: %v", err)
+	}
+
+	counts := []SignalCountDelta{
+		{PatternKey: "concise", PatternDisplay: "concise responses", Positive: 1, Negative: 0},
+		{PatternKey: "examples", PatternDisplay: "code examples", Positive: 0, Negative: 1},
+	}
+
+	if err := s.PersistSignalsAtomically("int-atomic", `[{"type":"positive","pattern":"concise responses"}]`, counts); err != nil {
+		t.Fatalf("PersistSignalsAtomically: %v", err)
+	}
+
+	// Verify extracted_signals was set.
+	has, err := s.HasExtractedSignals("int-atomic")
+	if err != nil {
+		t.Fatalf("HasExtractedSignals: %v", err)
+	}
+	if !has {
+		t.Error("expected HasExtractedSignals=true after atomic persist")
+	}
+
+	// Verify signal counts were written.
+	scs, err := s.GetSignalCounts()
+	if err != nil {
+		t.Fatalf("GetSignalCounts: %v", err)
+	}
+	if len(scs) != 2 {
+		t.Fatalf("expected 2 signal count rows, got %d", len(scs))
+	}
+}
+
+func TestPersistSignalsAtomically_NotFound_RollsBack(t *testing.T) {
+	s := openTestStore(t)
+
+	counts := []SignalCountDelta{
+		{PatternKey: "rollback-test", PatternDisplay: "rollback test", Positive: 1, Negative: 0},
+	}
+
+	err := s.PersistSignalsAtomically("nonexistent", `[]`, counts)
+	if err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+
+	// Verify signal counts were NOT written (transaction rolled back).
+	scs, err := s.GetSignalCounts()
+	if err != nil {
+		t.Fatalf("GetSignalCounts: %v", err)
+	}
+	if len(scs) != 0 {
+		t.Errorf("expected 0 signal count rows after rollback, got %d", len(scs))
+	}
+}
+
 func TestFailJob_SetsBackoff(t *testing.T) {
 	s := openTestStore(t)
 

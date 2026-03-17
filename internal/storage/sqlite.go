@@ -313,6 +313,54 @@ func (s *Store) UpdateExtractedSignals(id string, signalsJSON string) error {
 	return nil
 }
 
+// SignalCountDelta holds the increments for a single pattern, used by PersistSignalsAtomically.
+type SignalCountDelta struct {
+	PatternKey     string
+	PatternDisplay string
+	Positive       int
+	Negative       int
+}
+
+// PersistSignalsAtomically increments signal counts and marks the interaction
+// as processed in a single transaction, preventing double-counting on retry.
+func (s *Store) PersistSignalsAtomically(interactionID string, signalsJSON string, counts []SignalCountDelta) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Increment each signal count.
+	for _, c := range counts {
+		_, err := tx.Exec(`
+			INSERT INTO signal_counts (pattern_key, pattern_display, positive_count, negative_count)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(pattern_key) DO UPDATE SET
+				positive_count = positive_count + excluded.positive_count,
+				negative_count = negative_count + excluded.negative_count`,
+			c.PatternKey, c.PatternDisplay, c.Positive, c.Negative,
+		)
+		if err != nil {
+			return fmt.Errorf("incrementing signal count for %q: %w", c.PatternKey, err)
+		}
+	}
+
+	// Mark interaction as processed.
+	res, err := tx.Exec(`UPDATE interactions SET extracted_signals = ? WHERE id = ?`, signalsJSON, interactionID)
+	if err != nil {
+		return fmt.Errorf("updating extracted signals: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	return tx.Commit()
+}
+
 // SignalCount holds the per-pattern aggregated counts from signal_counts.
 type SignalCount struct {
 	PatternKey     string

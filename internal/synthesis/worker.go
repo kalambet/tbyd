@@ -20,7 +20,7 @@ type FeedbackJobStore interface {
 	GetInteraction(id string) (storage.Interaction, error)
 	HasExtractedSignals(id string) (bool, error)
 	UpdateExtractedSignals(id string, signalsJSON string) error
-	IncrementSignalCount(patternKey, patternDisplay string, pos, neg int) error
+	PersistSignalsAtomically(interactionID string, signalsJSON string, counts []storage.SignalCountDelta) error
 	GetSignalCounts() ([]storage.SignalCount, error)
 }
 
@@ -149,15 +149,13 @@ func (w *FeedbackWorker) processJob(ctx context.Context, job *storage.Job) error
 			if err != nil {
 				return fmt.Errorf("marshalling signals: %w", err)
 			}
-			// Increment per-pattern counts BEFORE marking the interaction as
-			// processed. If counting fails midway, the interaction won't be
-			// marked and the entire extraction+counting retries from scratch.
-			if err := w.persistSignalCounts(signals); err != nil {
-				return fmt.Errorf("persisting signal counts: %w", err)
-			}
-			// Mark as processed last — this is the idempotency sentinel.
-			if err := w.store.UpdateExtractedSignals(interaction.ID, string(signalsJSON)); err != nil {
-				return fmt.Errorf("storing extracted signals: %w", err)
+			// Build deltas for the atomic persist.
+			counts := buildSignalCountDeltas(signals)
+			// Atomically increment signal counts AND mark interaction as
+			// processed in a single transaction, preventing double-counting
+			// if the process crashes between the two steps.
+			if err := w.store.PersistSignalsAtomically(interaction.ID, string(signalsJSON), counts); err != nil {
+				return fmt.Errorf("persisting signals atomically: %w", err)
 			}
 		} else {
 			// No signals extracted — mark as processed with empty array so
@@ -190,10 +188,10 @@ func (w *FeedbackWorker) processJob(ctx context.Context, job *storage.Job) error
 	return nil
 }
 
-// persistSignalCounts increments per-pattern counters in the signal_counts
-// summary table. Each signal contributes +1 to the positive or negative counter
-// for its normalized pattern key.
-func (w *FeedbackWorker) persistSignalCounts(signals []PreferenceSignal) error {
+// buildSignalCountDeltas converts extracted signals into storage deltas for
+// the atomic persist call.
+func buildSignalCountDeltas(signals []PreferenceSignal) []storage.SignalCountDelta {
+	var deltas []storage.SignalCountDelta
 	for _, s := range signals {
 		key := strings.ToLower(strings.TrimSpace(s.Pattern))
 		if key == "" {
@@ -205,11 +203,16 @@ func (w *FeedbackWorker) persistSignalCounts(signals []PreferenceSignal) error {
 			pos = 1
 		case "negative":
 			neg = 1
+		default:
+			continue
 		}
-		if err := w.store.IncrementSignalCount(key, s.Pattern, pos, neg); err != nil {
-			return err
-		}
+		deltas = append(deltas, storage.SignalCountDelta{
+			PatternKey:     key,
+			PatternDisplay: s.Pattern,
+			Positive:       pos,
+			Negative:       neg,
+		})
 	}
-	return nil
+	return deltas
 }
 
