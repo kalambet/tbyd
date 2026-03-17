@@ -400,10 +400,9 @@ func deleteFromJSON(raw, selector string) (string, error) {
 //  1. Preferences phase: AddPreferences and RemovePreferences are applied as a
 //     single atomic read-modify-write under the write lock. No concurrent
 //     SetField or DeleteField can interleave with this phase.
-//  2. UpdateFields phase: each key/value pair is written via SetField, which
-//     acquires and releases the lock per call. Another writer could interleave
-//     between individual field updates, but each field write is itself atomic.
-//     This matches how the rest of the profile package operates.
+//  2. UpdateFields phase: all key/value pairs are written under a single
+//     write lock to avoid repeated lock cycling. No other writer can interleave
+//     between field updates within the same delta.
 //
 // The two phases are NOT jointly atomic — a concurrent writer could observe
 // the preferences change before UpdateFields are applied. This is acceptable
