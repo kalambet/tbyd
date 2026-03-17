@@ -8,6 +8,9 @@ import (
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrAlreadyReviewed is returned when a pending delta has already been accepted or rejected.
+var ErrAlreadyReviewed = errors.New("delta already reviewed")
+
 type Interaction struct {
 	ID             string    `json:"id"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -43,4 +46,17 @@ type ContextDoc struct {
 	CreatedAt time.Time
 	VectorID  string
 	Metadata  string // JSON object stored as text
+}
+
+// PendingProfileDelta is a proposed change to the user profile waiting for
+// human review. It is produced by background synthesis jobs and reviewed via
+// the management API.
+type PendingProfileDelta struct {
+	ID          string
+	DeltaJSON   string
+	Description string
+	Source      string     // "nightly_synthesis" | "feedback_aggregation"
+	Accepted    *bool      // nil = not reviewed
+	ReviewedAt  *time.Time
+	CreatedAt   time.Time
 }

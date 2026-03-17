@@ -781,3 +781,203 @@ func (s *Store) CountInteractions() (int, error) {
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM interactions`).Scan(&count)
 	return count, err
 }
+
+// --- Time-windowed queries ---
+
+// GetInteractionsWithFeedbackSince returns interactions that have a non-zero
+// feedback score and were created at or after since, ordered by most recent first.
+func (s *Store) GetInteractionsWithFeedbackSince(since time.Time) ([]Interaction, error) {
+	rows, err := s.db.Query(`
+		SELECT id, created_at, user_query, enriched_prompt, cloud_model, cloud_response, status, feedback_score, feedback_notes, vector_ids
+		FROM interactions
+		WHERE feedback_score != 0 AND created_at >= ?
+		ORDER BY created_at DESC`,
+		since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Interaction
+	for rows.Next() {
+		var i Interaction
+		var createdAt string
+		if err := rows.Scan(&i.ID, &createdAt, &i.UserQuery, &i.EnrichedPrompt, &i.CloudModel, &i.CloudResponse, &i.Status, &i.FeedbackScore, &i.FeedbackNotes, &i.VectorIDs); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		i.CreatedAt = t
+		results = append(results, i)
+	}
+	return results, rows.Err()
+}
+
+// GetContextDocsSince returns context docs created at or after since, ordered by most recent first.
+func (s *Store) GetContextDocsSince(since time.Time) ([]ContextDoc, error) {
+	rows, err := s.db.Query(`
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata
+		FROM context_docs
+		WHERE created_at >= ?
+		ORDER BY created_at DESC`,
+		since.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ContextDoc
+	for rows.Next() {
+		var d ContextDoc
+		var createdAt string
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parsing created_at: %w", err)
+		}
+		d.CreatedAt = t
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
+// --- Pending Profile Deltas ---
+
+// SavePendingDelta inserts a new pending profile delta.
+func (s *Store) SavePendingDelta(delta PendingProfileDelta) error {
+	_, err := s.db.Exec(`
+		INSERT INTO pending_profile_deltas (id, delta_json, description, source, accepted, reviewed_at, created_at)
+		VALUES (?, ?, ?, ?, NULL, NULL, ?)`,
+		delta.ID, delta.DeltaJSON, delta.Description, delta.Source,
+		delta.CreatedAt.UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+// ListPendingDeltas returns all deltas that have not yet been reviewed (accepted IS NULL).
+func (s *Store) ListPendingDeltas() ([]PendingProfileDelta, error) {
+	rows, err := s.db.Query(`
+		SELECT id, delta_json, description, source, accepted, reviewed_at, created_at
+		FROM pending_profile_deltas
+		WHERE accepted IS NULL
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []PendingProfileDelta
+	for rows.Next() {
+		d, err := scanPendingDelta(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, d)
+	}
+	return results, rows.Err()
+}
+
+// GetPendingDelta returns a single pending delta by ID.
+func (s *Store) GetPendingDelta(id string) (*PendingProfileDelta, error) {
+	row := s.db.QueryRow(`
+		SELECT id, delta_json, description, source, accepted, reviewed_at, created_at
+		FROM pending_profile_deltas WHERE id = ?`, id)
+	d, err := scanPendingDelta(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// ReviewDelta marks a pending delta as accepted or rejected atomically.
+// Returns ErrAlreadyReviewed if the delta has already been reviewed, or
+// ErrNotFound if the ID does not exist.
+func (s *Store) ReviewDelta(id string, accept bool) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var acceptedInt int
+	if accept {
+		acceptedInt = 1
+	}
+
+	// Atomic: only update rows where accepted IS NULL to prevent TOCTOU races.
+	res, err := s.db.Exec(`
+		UPDATE pending_profile_deltas SET accepted = ?, reviewed_at = ?
+		WHERE id = ? AND accepted IS NULL`,
+		acceptedInt, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// Distinguish "not found" from "already reviewed".
+		var exists int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pending_profile_deltas WHERE id = ?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrAlreadyReviewed
+	}
+	return nil
+}
+
+// HasPendingDeltaForSource reports whether an unreviewed delta from source
+// exists that was created at or after since. Used for deduplication.
+func (s *Store) HasPendingDeltaForSource(source string, since time.Time) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM pending_profile_deltas
+		WHERE source = ? AND accepted IS NULL AND created_at >= ?`,
+		source, since.UTC().Format(time.RFC3339),
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// scanner is satisfied by both *sql.Row and *sql.Rows so we can share scan logic.
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPendingDelta(s scanner) (PendingProfileDelta, error) {
+	var d PendingProfileDelta
+	var accepted sql.NullInt64
+	var reviewedAt sql.NullString
+	var createdAt string
+	if err := s.Scan(&d.ID, &d.DeltaJSON, &d.Description, &d.Source, &accepted, &reviewedAt, &createdAt); err != nil {
+		return PendingProfileDelta{}, err
+	}
+	if accepted.Valid {
+		v := accepted.Int64 != 0
+		d.Accepted = &v
+	}
+	if reviewedAt.Valid && reviewedAt.String != "" {
+		t, err := time.Parse(time.RFC3339, reviewedAt.String)
+		if err != nil {
+			return PendingProfileDelta{}, fmt.Errorf("parsing reviewed_at: %w", err)
+		}
+		d.ReviewedAt = &t
+	}
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return PendingProfileDelta{}, fmt.Errorf("parsing created_at: %w", err)
+	}
+	d.CreatedAt = t
+	return d, nil
+}
