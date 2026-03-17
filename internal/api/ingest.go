@@ -65,12 +65,13 @@ type VectorDeleter interface {
 }
 
 type AppDeps struct {
-	Store      *storage.Store
-	Profile    *profile.Manager
-	Token      string
-	HTTPClient *http.Client
-	Vectors    VectorDeleter // optional; if nil, vector cleanup is skipped on delete
-	Retriever  Retriever     // optional; if nil, /recall returns 501
+	Store             *storage.Store
+	Profile           *profile.Manager
+	Token             string
+	HTTPClient        *http.Client
+	Vectors           VectorDeleter // optional; if nil, vector cleanup is skipped on delete
+	Retriever         Retriever     // optional; if nil, /recall returns 501
+	DeepEnrichEnabled bool          // when true, also enqueue an ingest_deep_enrich job on ingest
 }
 
 // Retriever abstracts semantic search for the management API layer.
@@ -226,6 +227,20 @@ func handleIngest(deps AppDeps) http.HandlerFunc {
 		if err := deps.Store.EnqueueJob(r.Context(), job); err != nil {
 			httpError(w, http.StatusInternalServerError, "api_error", "failed to enqueue job: %v", err)
 			return
+		}
+
+		// Enqueue deep enrichment job if deep enrichment is enabled.
+		if deps.DeepEnrichEnabled {
+			deepJob := storage.Job{
+				ID:          uuid.New().String(),
+				Type:        "ingest_deep_enrich",
+				PayloadJSON: string(payload),
+				MaxAttempts: 3,
+			}
+			if err := deps.Store.EnqueueJob(r.Context(), deepJob); err != nil {
+				slog.Warn("failed to enqueue deep enrichment job", "doc_id", docID, "error", err)
+				// Non-fatal: pass 1 enrichment is sufficient.
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

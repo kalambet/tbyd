@@ -126,6 +126,31 @@ var specs = []keySpec{
 		apply:   func(cfg *Config, v any) { cfg.Enrichment.CacheSemanticTTL = v.(string) },
 		extract: func(cfg Config) any { return cfg.Enrichment.CacheSemanticTTL },
 	},
+	{
+		key: "enrichment.deep_enabled", typ: kBool, env: "TBYD_ENRICHMENT_DEEP_ENABLED",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.DeepEnabled = v.(bool) },
+		extract: func(cfg Config) any { return cfg.Enrichment.DeepEnabled },
+	},
+	{
+		key: "enrichment.deep_schedule", typ: kString, env: "TBYD_ENRICHMENT_DEEP_SCHEDULE",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.DeepSchedule = v.(string) },
+		extract: func(cfg Config) any { return cfg.Enrichment.DeepSchedule },
+	},
+	{
+		key: "enrichment.deep_idle_cpu_max_percent", typ: kInt, env: "TBYD_ENRICHMENT_DEEP_IDLE_CPU_MAX_PERCENT",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.DeepIdleCPUMaxPct = v.(int) },
+		extract: func(cfg Config) any { return cfg.Enrichment.DeepIdleCPUMaxPct },
+	},
+	{
+		key: "enrichment.deep_idle_mem_min_gb", typ: kInt, env: "TBYD_ENRICHMENT_DEEP_IDLE_MEM_MIN_GB",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.DeepIdleMemMinGB = v.(int) },
+		extract: func(cfg Config) any { return cfg.Enrichment.DeepIdleMemMinGB },
+	},
+	{
+		key: "enrichment.deep_batch_claim_limit", typ: kInt, env: "TBYD_ENRICHMENT_DEEP_BATCH_CLAIM_LIMIT",
+		apply:   func(cfg *Config, v any) { cfg.Enrichment.DeepBatchClaimLimit = v.(int) },
+		extract: func(cfg Config) any { return cfg.Enrichment.DeepBatchClaimLimit },
+	},
 }
 
 func applyBackend(cfg *Config, b ConfigBackend) error {

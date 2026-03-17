@@ -67,6 +67,12 @@ type EnrichmentConfig struct {
 	CacheSemanticThreshold float64 // cosine similarity threshold for semantic cache hit
 	CacheExactTTL          string  // duration string, e.g. "5m"
 	CacheSemanticTTL       string  // duration string, e.g. "30m"
+
+	DeepEnabled         bool
+	DeepSchedule        string // "HH:MM" e.g. "2:00"
+	DeepIdleCPUMaxPct   int    // max CPU % to consider system idle
+	DeepIdleMemMinGB    int    // min available memory (GB) to consider system idle
+	DeepBatchClaimLimit int    // max jobs to claim per deep enrichment pass
 }
 
 func defaults() Config {
@@ -103,6 +109,12 @@ func defaults() Config {
 			CacheSemanticThreshold: DefaultSemanticThreshold,
 			CacheExactTTL:          "5m",
 			CacheSemanticTTL:       "30m",
+
+			DeepEnabled:         false,
+			DeepSchedule:        "2:00",
+			DeepIdleCPUMaxPct:   10,
+			DeepIdleMemMinGB:    4,
+			DeepBatchClaimLimit: 5000,
 		},
 	}
 }
