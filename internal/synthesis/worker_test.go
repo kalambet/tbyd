@@ -77,8 +77,25 @@ func TestBuildSignalCountDeltas_SkipsUnknownType(t *testing.T) {
 func TestBuildSignalCountDeltas_Empty(t *testing.T) {
 	deltas := buildSignalCountDeltas(nil)
 
-	if deltas != nil {
-		t.Errorf("expected nil for empty input, got %v", deltas)
+	if len(deltas) != 0 {
+		t.Errorf("expected 0 deltas for empty input, got %d", len(deltas))
+	}
+}
+
+func TestBuildSignalCountDeltas_AggregatesDuplicates(t *testing.T) {
+	signals := []PreferenceSignal{
+		{Type: "positive", Pattern: "concise responses"},
+		{Type: "positive", Pattern: "concise responses"},
+		{Type: "negative", Pattern: "concise responses"},
+	}
+
+	deltas := buildSignalCountDeltas(signals)
+
+	if len(deltas) != 1 {
+		t.Fatalf("expected 1 delta (duplicates aggregated), got %d", len(deltas))
+	}
+	if deltas[0].Positive != 2 || deltas[0].Negative != 1 {
+		t.Errorf("expected pos=2 neg=1, got pos=%d neg=%d", deltas[0].Positive, deltas[0].Negative)
 	}
 }
 

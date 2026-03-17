@@ -155,3 +155,26 @@ func TestApplyDelta_InvalidatesCache(t *testing.T) {
 		t.Error("expected onInvalidate callback to be called after ApplyDelta")
 	}
 }
+
+func TestApplyDelta_InvalidatesExactlyOnce(t *testing.T) {
+	mgr, _ := newTestManager()
+
+	callCount := 0
+	mgr.OnInvalidate(func() { callCount++ })
+
+	// Delta that exercises both phases: preferences + field updates.
+	delta := ProfileDelta{
+		AddPreferences: []string{"be concise"},
+		UpdateFields: map[string]string{
+			"communication.tone":         "technical",
+			"communication.detail_level": "high",
+		},
+	}
+	if err := mgr.ApplyDelta(delta); err != nil {
+		t.Fatalf("ApplyDelta failed: %v", err)
+	}
+
+	if callCount != 1 {
+		t.Errorf("expected onInvalidate to be called exactly once, got %d", callCount)
+	}
+}

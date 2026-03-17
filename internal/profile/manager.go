@@ -410,20 +410,44 @@ func deleteFromJSON(raw, selector string) (string, error) {
 // because the synthesis pipeline only uses AddPreferences/RemovePreferences
 // today, and UpdateFields entries are independent key-value pairs with no
 // cross-field invariants.
+//
+// onInvalidate is called at most once per ApplyDelta invocation, after all
+// writes are committed and all locks are released.
 func (m *Manager) ApplyDelta(delta ProfileDelta) error {
+	changed := false
+
 	// --- preferences (AddPreferences + RemovePreferences) ---
+	// applyPreferencesDelta holds m.mu.Lock() internally and does NOT call
+	// onInvalidate; we do that once at the end.
 	if len(delta.AddPreferences) > 0 || len(delta.RemovePreferences) > 0 {
 		if err := m.applyPreferencesDelta(delta); err != nil {
 			return err
 		}
+		changed = true
 	}
 
 	// --- UpdateFields ---
-	// Each call to SetField acquires the write lock independently, matching the
-	// behaviour of all other callers of SetField.
-	for key, value := range delta.UpdateFields {
-		if err := m.SetField(key, value); err != nil {
-			return fmt.Errorf("applying delta field %q: %w", key, err)
+	// Acquire the lock once for all field writes to avoid repeated lock
+	// cycling and to batch the cache invalidations into the single call below.
+	if len(delta.UpdateFields) > 0 {
+		m.mu.Lock()
+		for key, value := range delta.UpdateFields {
+			if err := m.setFieldNoInvalidate(key, value); err != nil {
+				m.mu.Unlock()
+				return fmt.Errorf("applying delta field %q: %w", key, err)
+			}
+		}
+		m.mu.Unlock()
+		changed = true
+	}
+
+	// Single cache invalidation after all changes, with no lock held.
+	if changed {
+		m.mu.RLock()
+		fn := m.onInvalidate
+		m.mu.RUnlock()
+		if fn != nil {
+			fn()
 		}
 	}
 
@@ -495,9 +519,17 @@ func (m *Manager) applyPreferencesDelta(delta ProfileDelta) error {
 
 	m.cached = nil
 	m.profileVersion++
-	if m.onInvalidate != nil {
-		m.onInvalidate()
+	return nil
+}
+
+// setFieldNoInvalidate persists a profile key, nils the cache, and bumps the
+// version, but does NOT call onInvalidate. The caller must hold m.mu.Lock().
+func (m *Manager) setFieldNoInvalidate(key string, value string) error {
+	if err := m.store.SetProfileKey(key, value); err != nil {
+		return fmt.Errorf("setting profile key %q: %w", key, err)
 	}
+	m.cached = nil
+	m.profileVersion++
 	return nil
 }
 

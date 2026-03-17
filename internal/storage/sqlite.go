@@ -369,21 +369,6 @@ type SignalCount struct {
 	NegativeCount  int
 }
 
-// IncrementSignalCount atomically upserts the count for a normalized pattern.
-// patternKey is the lowercase-normalized key; patternDisplay is the first-seen
-// original casing preserved for human-readable output.
-func (s *Store) IncrementSignalCount(patternKey, patternDisplay string, positive, negative int) error {
-	_, err := s.db.Exec(`
-		INSERT INTO signal_counts (pattern_key, pattern_display, positive_count, negative_count)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(pattern_key) DO UPDATE SET
-			positive_count = positive_count + excluded.positive_count,
-			negative_count = negative_count + excluded.negative_count`,
-		patternKey, patternDisplay, positive, negative,
-	)
-	return err
-}
-
 // GetSignalCounts returns all rows from signal_counts. The result set size is
 // bounded by the number of distinct preference patterns (typically < 100 for a
 // single user), not by the total number of interactions.

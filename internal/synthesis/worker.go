@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,9 +190,19 @@ func (w *FeedbackWorker) processJob(ctx context.Context, job *storage.Job) error
 }
 
 // buildSignalCountDeltas converts extracted signals into storage deltas for
-// the atomic persist call.
+// the atomic persist call. Duplicate patterns are aggregated so each unique
+// key produces at most one UPSERT.
 func buildSignalCountDeltas(signals []PreferenceSignal) []storage.SignalCountDelta {
-	var deltas []storage.SignalCountDelta
+	if len(signals) == 0 {
+		return nil
+	}
+
+	type entry struct {
+		delta storage.SignalCountDelta
+		order int // preserve insertion order for deterministic output
+	}
+	seen := make(map[string]*entry)
+	idx := 0
 	for _, s := range signals {
 		key := strings.ToLower(strings.TrimSpace(s.Pattern))
 		if key == "" {
@@ -206,12 +217,32 @@ func buildSignalCountDeltas(signals []PreferenceSignal) []storage.SignalCountDel
 		default:
 			continue
 		}
-		deltas = append(deltas, storage.SignalCountDelta{
-			PatternKey:     key,
-			PatternDisplay: s.Pattern,
-			Positive:       pos,
-			Negative:       neg,
-		})
+		if e, ok := seen[key]; ok {
+			e.delta.Positive += pos
+			e.delta.Negative += neg
+		} else {
+			seen[key] = &entry{
+				delta: storage.SignalCountDelta{
+					PatternKey:     key,
+					PatternDisplay: s.Pattern, // first-seen casing
+					Positive:       pos,
+					Negative:       neg,
+				},
+				order: idx,
+			}
+			idx++
+		}
+	}
+
+	deltas := make([]storage.SignalCountDelta, 0, len(seen))
+	// Sort by insertion order for deterministic output.
+	sorted := make([]*entry, 0, len(seen))
+	for _, e := range seen {
+		sorted = append(sorted, e)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].order < sorted[j].order })
+	for _, e := range sorted {
+		deltas = append(deltas, e.delta)
 	}
 	return deltas
 }
