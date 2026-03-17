@@ -229,6 +229,15 @@ func runServer() error {
 	feedbackWorker := synthesis.NewFeedbackWorker(store, prefExtractor, profileMgr, 500*time.Millisecond)
 	go feedbackWorker.Run(ctx)
 
+	// Build and start nightly profile synthesis worker.
+	nightlyModel := cfg.Ollama.DeepModel
+	if nightlyModel == "" {
+		nightlyModel = cfg.Ollama.FastModel
+	}
+	nightlySynth := synthesis.NewNightlySynthesizer(store, engine.ChatAdapter(ollamaEngine), nightlyModel)
+	go nightlySynth.ProcessJobs(ctx, 30*time.Second)
+	go nightlySynth.Schedule(ctx, 24*time.Hour)
+
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
 	onboarding := api.NewOnboardingNotifier(&serverOnboardingConfig{cfg: cfg})

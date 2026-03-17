@@ -93,6 +93,9 @@ func NewAppHandler(deps AppDeps) http.Handler {
 	r.Get("/context-docs", handleListContextDocs(deps))
 	r.Delete("/context-docs/{id}", handleDeleteContextDoc(deps))
 	r.Get("/recall", handleRecall(deps))
+	r.Get("/profile/pending-deltas", handleGetPendingDeltas(deps))
+	r.Post("/profile/pending-deltas/{id}/accept", handleAcceptDelta(deps))
+	r.Post("/profile/pending-deltas/{id}/reject", handleRejectDelta(deps))
 
 	return r
 }
