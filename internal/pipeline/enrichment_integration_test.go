@@ -50,10 +50,10 @@ func setupIntegrationPipeline(t *testing.T) (*Enricher, *retrieval.Embedder, *re
 
 	embedder := retrieval.NewEmbedder(eng, "nomic-embed-text")
 	ret := retrieval.NewRetriever(embedder, vectorStore)
-	ext := intent.NewExtractor(engine.ChatAdapter(eng), "phi3.5")
+	ext := intent.NewExtractor(engine.ChatAdapter(eng), "phi3.5", nil)
 	profileMgr := profile.NewManager(store)
 	comp := composer.New(4000)
-	enricher := NewEnricher(ext, ret, profileMgr, comp, 5)
+	enricher := NewEnricher(ext, ret, profileMgr, comp, nil, 5, nil) // nil reranker + nil cache
 
 	return enricher, embedder, vectorStore, store
 }

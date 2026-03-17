@@ -8,6 +8,7 @@ import (
 
 	"github.com/kalambet/tbyd/internal/proxy"
 	"github.com/kalambet/tbyd/internal/retrieval"
+	"github.com/kalambet/tbyd/internal/sanitize"
 )
 
 const defaultMaxContextTokens = 4000
@@ -31,16 +32,22 @@ func New(maxContextTokens int) *Composer {
 }
 
 // Compose builds an enriched ChatRequest by prepending a system message
-// containing the profile summary and relevant context chunks. If the original
-// request already has a system message, the enrichment content is prepended
-// to it. Original user messages are preserved unchanged.
-func (c *Composer) Compose(req proxy.ChatRequest, chunks []retrieval.ContextChunk, profileSummary string) (proxy.ChatRequest, error) {
+// containing explicit preferences, the profile summary, and relevant context
+// chunks. If the original request already has a system message, the enrichment
+// content is prepended to it. Original user messages are preserved unchanged.
+//
+// explicitPrefs are user-set preferences and opinions injected before the profile
+// summary. They are never dropped in favour of context chunks but are capped at
+// explicitPrefsTokenCap tokens total; if the list exceeds the cap, the first
+// (highest-priority) items are preserved and later items are dropped.
+// profileSummary covers identity, communication, and interests.
+func (c *Composer) Compose(req proxy.ChatRequest, chunks []retrieval.ContextChunk, explicitPrefs []string, profileSummary string) (proxy.ChatRequest, error) {
 	msgs, err := parseMessages(req.Messages)
 	if err != nil {
 		return req, fmt.Errorf("parsing messages: %w", err)
 	}
 
-	enrichment := c.buildEnrichment(chunks, profileSummary)
+	enrichment := c.buildEnrichment(chunks, explicitPrefs, profileSummary)
 	if enrichment == "" {
 		return req, nil
 	}
@@ -64,13 +71,47 @@ func (c *Composer) Compose(req proxy.ChatRequest, chunks []retrieval.ContextChun
 	return out, nil
 }
 
-// buildEnrichment constructs the system message content from profile and chunks,
-// respecting the token budget by dropping lowest-scoring chunks first.
-func (c *Composer) buildEnrichment(chunks []retrieval.ContextChunk, profileSummary string) string {
+// explicitPrefsTokenCap is the maximum token budget reserved for the
+// [Explicit Preferences] section. Explicit preferences are never truncated
+// themselves, but the section is capped so it cannot crowd out all context.
+const explicitPrefsTokenCap = 200
+
+// buildEnrichment constructs the system message content from explicit
+// preferences, profile summary, and context chunks. Explicit preferences are
+// hard-capped at explicitPrefsTokenCap tokens but are never dropped in favour
+// of context — only context chunks are truncated when the budget is tight.
+func (c *Composer) buildEnrichment(chunks []retrieval.ContextChunk, explicitPrefs []string, profileSummary string) string {
 	var sb strings.Builder
 
-	// Profile section.
+	// [Explicit Preferences] section — injected before [User Profile].
+	// Hard cap at explicitPrefsTokenCap tokens; take first-N items that fit.
+	if len(explicitPrefs) > 0 {
+		var prefLines []string
+		used := 0
+		for _, pref := range explicitPrefs {
+			// Strip newlines to prevent section-boundary injection.
+			pref = sanitize.ForPrompt(pref)
+			line := "- " + pref + "\n"
+			t := EstimateTokens(line)
+			if used+t > explicitPrefsTokenCap {
+				break
+			}
+			prefLines = append(prefLines, line)
+			used += t
+		}
+		if len(prefLines) > 0 {
+			sb.WriteString("[Explicit Preferences]\n")
+			for _, line := range prefLines {
+				sb.WriteString(line)
+			}
+		}
+	}
+
+	// [User Profile] section — identity, communication, interests summary.
 	if profileSummary != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
 		sb.WriteString("[User Profile]\n")
 		sb.WriteString(profileSummary)
 	}
@@ -87,10 +128,14 @@ func (c *Composer) buildEnrichment(chunks []retrieval.ContextChunk, profileSumma
 	})
 
 	// Budget: total injected content must stay under MaxContextTokens.
-	profileTokens := EstimateTokens(sb.String())
+	// Explicit preferences and profile summary are already committed; only
+	// context chunks are subject to the budget limit.
 	contextHeader := "\n\n[Retrieved Context]\n"
-	headerTokens := EstimateTokens(contextHeader)
-	remaining := c.MaxContextTokens - profileTokens - headerTokens
+	fixedTokens := EstimateTokens(sb.String()) + EstimateTokens(contextHeader)
+	remaining := c.MaxContextTokens - fixedTokens
+	if remaining <= 0 {
+		return sb.String()
+	}
 
 	var selectedEntries []string
 	for _, ch := range sorted {

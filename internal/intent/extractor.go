@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/profile"
 )
 
 const extractionTimeout = 3 * time.Second
@@ -28,21 +29,33 @@ type Intent struct {
 	SuggestedTopK  int      `json:"suggested_top_k"`   // 0 = use default
 }
 
+// CalibrationProvider returns a fresh CalibrationContext on each call so the
+// intent extractor always uses the latest profile expertise. Implementations
+// must be safe for concurrent use.
+type CalibrationProvider func() profile.CalibrationContext
+
 // Extractor uses a fast local LLM to extract structured intent from user queries.
 type Extractor struct {
-	client OllamaChatter
-	model  string
+	client              OllamaChatter
+	model               string
+	calibrationProvider CalibrationProvider
 }
 
-// NewExtractor creates an Extractor using the given Ollama client and model name.
-func NewExtractor(client OllamaChatter, model string) *Extractor {
-	return &Extractor{client: client, model: model}
+// NewExtractor creates an Extractor using the given Ollama client, model name,
+// and calibration provider. The provider is called on every Extract invocation
+// so that profile expertise changes are reflected without restarting the server.
+func NewExtractor(client OllamaChatter, model string, calibrationProvider CalibrationProvider) *Extractor {
+	return &Extractor{client: client, model: model, calibrationProvider: calibrationProvider}
 }
 
 // Extract analyses the query and recent history, returning a structured Intent.
 // On any failure (timeout, malformed JSON, Ollama error) it returns a zero-value
 // Intent — the enrichment pipeline must not block on extraction failures.
-func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []ollama.Message, profileSummary string) Intent {
+//
+// calibration is optional: if non-zero it is used directly; otherwise the
+// CalibrationProvider (if set) is called. This lets callers that already hold
+// the profile avoid a redundant storage round-trip.
+func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []ollama.Message, profileSummary string, calibration profile.CalibrationContext) Intent {
 	if query == "" {
 		return Intent{}
 	}
@@ -50,7 +63,10 @@ func (e *Extractor) Extract(ctx context.Context, query string, recentHistory []o
 	ctx, cancel := context.WithTimeout(ctx, extractionTimeout)
 	defer cancel()
 
-	messages := BuildPrompt(query, recentHistory, profileSummary)
+	if calibration.Hints == "" && e.calibrationProvider != nil {
+		calibration = e.calibrationProvider()
+	}
+	messages := BuildPrompt(query, recentHistory, profileSummary, calibration)
 
 	raw, err := e.client.Chat(ctx, e.model, messages, &intentSchema)
 	if err != nil {

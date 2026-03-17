@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/kalambet/tbyd/internal/sanitize"
 )
 
 // ErrFieldNotFound is returned when a profile field path does not exist.
@@ -543,13 +545,54 @@ func (m *Manager) ProfileVersion() int64 {
 
 // GetSummary returns a compact string representation of the profile suitable
 // for injection into a system prompt. Targets < 500 tokens (~2000 chars).
-// Explicit preferences (set directly by user) appear before inferred ones.
+// Explicit preferences (Preferences, Opinions) are excluded here — they are
+// injected separately via the composer's [Explicit Preferences] section.
 func (m *Manager) GetSummary() (string, error) {
 	p, err := m.GetProfile()
 	if err != nil {
 		return "", fmt.Errorf("getting profile for summary: %w", err)
 	}
 	return summarize(p), nil
+}
+
+// SummarizeProfile returns a compact string representation of the given profile.
+// This is the same logic as GetSummary but accepts a pre-loaded Profile to avoid
+// a redundant storage round-trip when the caller already holds the profile.
+func (m *Manager) SummarizeProfile(p Profile) string {
+	return summarize(p)
+}
+
+// GetCalibrationContext loads the current profile and builds a CalibrationContext.
+func (m *Manager) GetCalibrationContext() (CalibrationContext, error) {
+	p, err := m.GetProfile()
+	if err != nil {
+		return CalibrationContext{}, fmt.Errorf("getting profile for calibration: %w", err)
+	}
+	return m.BuildCalibration(p), nil
+}
+
+// BuildCalibration derives a CalibrationContext from a pre-loaded Profile.
+// Use this instead of GetCalibrationContext when the caller already holds
+// the profile to avoid a redundant storage round-trip.
+func (m *Manager) BuildCalibration(p Profile) CalibrationContext {
+	if len(p.Identity.Expertise) == 0 {
+		return CalibrationContext{Hints: "No specific domain expertise configured."}
+	}
+
+	domains := make([]string, 0, len(p.Identity.Expertise))
+	for domain := range p.Identity.Expertise {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+
+	var sentences []string
+	for _, domain := range domains {
+		level := sanitize.ForPrompt(p.Identity.Expertise[domain])
+		domain = sanitize.ForPrompt(domain)
+		sentences = append(sentences, fmt.Sprintf("User has %s expertise in %s.", level, domain))
+	}
+
+	return CalibrationContext{Hints: strings.Join(sentences, " ")}
 }
 
 // maxSummaryChars caps the summary to stay under ~500 tokens.
@@ -595,11 +638,6 @@ func summarize(p Profile) string {
 		parts = append(parts, fmt.Sprintf("Prefers: %s.", strings.Join(commParts, ", ")))
 	}
 
-	// Explicit preferences first (positional priority per issue 3.4 spec).
-	for _, pref := range p.Preferences {
-		parts = append(parts, pref)
-	}
-
 	// Interests — primary first, then emerging. Allocate a fresh slice so that
 	// append never writes into the backing array of p.Interests.Primary, which
 	// would silently corrupt the caller's copy when capacity allows it.
@@ -610,10 +648,9 @@ func summarize(p Profile) string {
 		parts = append(parts, fmt.Sprintf("Interests: %s.", strings.Join(allInterests, ", ")))
 	}
 
-	// Opinions
-	for _, o := range p.Opinions {
-		parts = append(parts, o)
-	}
+	// NOTE: Preferences and Opinions are intentionally excluded here.
+	// They are injected as [Explicit Preferences] by the composer to avoid
+	// duplication and to guarantee they are never truncated by the summary cap.
 
 	// Language / model preference
 	if p.Language != "" {

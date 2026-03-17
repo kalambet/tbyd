@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/profile"
 )
 
 func TestExtract_RealOllama(t *testing.T) {
@@ -19,10 +20,10 @@ func TestExtract_RealOllama(t *testing.T) {
 		t.Skip("phi3.5 model not available, skipping integration test")
 	}
 
-	e := NewExtractor(client, "phi3.5")
+	e := NewExtractor(client, "phi3.5", nil)
 
 	start := time.Now()
-	intent := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "")
+	intent := e.Extract(context.Background(), "what did I decide about the database schema last week", nil, "", profile.CalibrationContext{})
 	elapsed := time.Since(start)
 
 	if elapsed > extractionTimeout {

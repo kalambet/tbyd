@@ -2,6 +2,7 @@ package composer
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -34,7 +35,7 @@ func TestCompose_EmptyContext(t *testing.T) {
 	c := New(4000)
 	req := makeRequest(t, map[string]string{"role": "user", "content": "hello"})
 
-	out, err := c.Compose(req, nil, "")
+	out, err := c.Compose(req, nil, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestCompose_ProfileInjected(t *testing.T) {
 	c := New(4000)
 	req := makeRequest(t, map[string]string{"role": "user", "content": "hi"})
 
-	out, err := c.Compose(req, nil, "User: engineer. Prefers: direct tone.")
+	out, err := c.Compose(req, nil, nil, "User: engineer. Prefers: direct tone.")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestCompose_ChunksAppended(t *testing.T) {
 		{ID: "2", SourceID: "doc2", SourceType: "extracted", Text: "chunk two text", Score: 0.9},
 	}
 
-	out, err := c.Compose(req, chunks, "User: dev.")
+	out, err := c.Compose(req, chunks, nil, "User: dev.")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestCompose_ExistingSystemMessage(t *testing.T) {
 		map[string]string{"role": "user", "content": "help me"},
 	)
 
-	out, err := c.Compose(req, nil, "User: engineer.")
+	out, err := c.Compose(req, nil, nil, "User: engineer.")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestCompose_TokenBudget(t *testing.T) {
 		}
 	}
 
-	out, err := c.Compose(req, chunks, "")
+	out, err := c.Compose(req, chunks, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestCompose_LowestScoringChunkDropped(t *testing.T) {
 		{ID: "b", SourceID: "b", SourceType: "m", Text: strings.Repeat("B", 80), Score: 0.5},
 	}
 
-	out, err := c.Compose(req, chunks, "short")
+	out, err := c.Compose(req, chunks, nil, "short")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestCompose_UserMessagesUnchanged(t *testing.T) {
 		{ID: "1", SourceID: "s1", SourceType: "m", Text: "context", Score: 0.8},
 	}
 
-	out, err := c.Compose(req, chunks, "profile")
+	out, err := c.Compose(req, chunks, nil, "profile")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,7 +228,7 @@ func TestCompose_PreservesUnknownFields(t *testing.T) {
 		Messages: json.RawMessage(raw),
 	}
 
-	out, err := c.Compose(req, nil, "profile")
+	out, err := c.Compose(req, nil, nil, "profile")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,5 +270,145 @@ func TestEstimateTokens(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("EstimateTokens(%q) = %d, want %d", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestCompose_ExplicitPreferencesCapEnforced(t *testing.T) {
+	// Very tight token budget — only enough for a few chunks.
+	c := New(80)
+	req := makeRequest(t, map[string]string{"role": "user", "content": "q"})
+
+	// 30 uniquely-named explicit preferences, each long enough to trigger the
+	// 200-token cap. Each ~40 chars → ~10 tokens, so 30 × 10 = ~300 > 200.
+	prefs := make([]string, 30)
+	for i := range prefs {
+		prefs[i] = fmt.Sprintf("preference number %02d with extended detail", i)
+	}
+
+	// 20 bulky chunks that will compete for budget.
+	chunks := make([]retrieval.ContextChunk, 20)
+	for i := range chunks {
+		chunks[i] = retrieval.ContextChunk{
+			ID:         "id",
+			SourceID:   "src",
+			SourceType: "manual",
+			Text:       strings.Repeat("x", 100),
+			Score:      float32(20-i) / 20.0,
+		}
+	}
+
+	out, err := c.Compose(req, chunks, prefs, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := decodeMessages(t, out)
+	sysContent := getContent(msgs[0])
+
+	if !strings.Contains(sysContent, "[Explicit Preferences]") {
+		t.Error("system message missing [Explicit Preferences] section")
+	}
+
+	// The 200-token cap means not all 30 fit. Verify:
+	// 1. First items are present (highest priority preserved).
+	if !strings.Contains(sysContent, "preference number 00") {
+		t.Error("first preference (highest priority) missing")
+	}
+	if !strings.Contains(sysContent, "preference number 01") {
+		t.Error("second preference missing")
+	}
+
+	// 2. Some later items are dropped (cap enforced).
+	included := 0
+	for i := range prefs {
+		if strings.Contains(sysContent, fmt.Sprintf("preference number %02d", i)) {
+			included++
+		}
+	}
+	if included == 30 {
+		t.Error("expected 200-token cap to truncate some preferences, but all 30 were included")
+	}
+	if included == 0 {
+		t.Error("no preferences included at all")
+	}
+	t.Logf("included %d of 30 preferences (200-token cap)", included)
+
+	// 3. Chunks are truncated, not preferences — no chunk content should appear
+	//    given the tight budget after preferences.
+	if strings.Contains(sysContent, "[Retrieved Context]") {
+		t.Error("expected [Retrieved Context] section to be absent when budget is exceeded by fixed content")
+	}
+}
+
+func TestCompose_ExplicitSectionBeforeContext(t *testing.T) {
+	c := New(4000)
+	req := makeRequest(t, map[string]string{"role": "user", "content": "q"})
+
+	prefs := []string{"prefer concise answers"}
+	chunks := []retrieval.ContextChunk{
+		{ID: "1", SourceID: "doc1", SourceType: "manual", Text: "retrieved context text", Score: 0.9},
+	}
+
+	out, err := c.Compose(req, chunks, prefs, "User: engineer.")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := decodeMessages(t, out)
+	sysContent := getContent(msgs[0])
+
+	prefIdx := strings.Index(sysContent, "[Explicit Preferences]")
+	ctxIdx := strings.Index(sysContent, "[Retrieved Context]")
+	if prefIdx == -1 {
+		t.Fatal("system message missing [Explicit Preferences] section")
+	}
+	if ctxIdx == -1 {
+		t.Fatal("system message missing [Retrieved Context] section")
+	}
+	if prefIdx > ctxIdx {
+		t.Error("[Explicit Preferences] should appear before [Retrieved Context]")
+	}
+}
+
+func TestCompose_ChunksTruncatedWhenBudgetExceeded(t *testing.T) {
+	// Budget large enough for explicit prefs and profile, but tight for chunks.
+	c := New(100)
+	req := makeRequest(t, map[string]string{"role": "user", "content": "q"})
+
+	// A few explicit preferences — must always be present.
+	explicitPrefs := []string{"explicit pref one", "explicit pref two"}
+
+	// Many large chunks that should be truncated by the budget.
+	chunks := make([]retrieval.ContextChunk, 10)
+	for i := range chunks {
+		chunks[i] = retrieval.ContextChunk{
+			ID:         "id",
+			SourceID:   "src",
+			SourceType: "manual",
+			Text:       strings.Repeat("z", 200),
+			Score:      float32(10-i) / 10.0,
+		}
+	}
+
+	out, err := c.Compose(req, chunks, explicitPrefs, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := decodeMessages(t, out)
+	sysContent := getContent(msgs[0])
+
+	// Explicit prefs must be present.
+	for _, pref := range explicitPrefs {
+		if !strings.Contains(sysContent, pref) {
+			t.Errorf("explicit pref %q was truncated (must never be)", pref)
+		}
+	}
+
+	// At least some chunks should have been truncated (200 z's × 10 = way over budget).
+	// Count occurrences of the chunk text.
+	chunkCount := strings.Count(sysContent, strings.Repeat("z", 200))
+	if chunkCount == 10 {
+		t.Error("expected some chunks to be truncated when budget is tight, but all 10 are present")
 	}
 }

@@ -117,8 +117,31 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 	// and be rejected on subsequent Get calls (see QueryCache.minProfileVersion).
 	profileVersion := e.profile.ProfileVersion()
 
-	// 1. Extract intent from last user message.
-	extracted := e.extractor.Extract(ctx, lastUserMsg, nil, "")
+	// 1. Load profile (single fetch, reused for extraction and composition).
+	var p profile.Profile
+	var profileLoaded bool
+	if loaded, profErr := e.profile.GetProfile(); profErr == nil {
+		p = loaded
+		profileLoaded = true
+	} else {
+		slog.Warn("enrichment: failed to load profile", "error", profErr)
+	}
+
+	// Compute profile summary once — reused for both extraction and composition.
+	var profileSummary string
+	if profileLoaded {
+		profileSummary = e.profile.SummarizeProfile(p)
+	}
+
+	// Derive calibration from the already-loaded profile to avoid a redundant
+	// storage round-trip through the CalibrationProvider.
+	var calibration profile.CalibrationContext
+	if profileLoaded {
+		calibration = e.profile.BuildCalibration(p)
+	}
+
+	// Extract intent — pass profile summary and calibration for domain-aware extraction.
+	extracted := e.extractor.Extract(ctx, lastUserMsg, nil, profileSummary, calibration)
 	if extracted.IntentType != "" {
 		meta.IntentExtracted = true
 	}
@@ -142,15 +165,17 @@ func (e *Enricher) Enrich(ctx context.Context, req proxy.ChatRequest) (out proxy
 		meta.ChunksUsed = append(meta.ChunksUsed, ch.ID)
 	}
 
-	// 4. Load profile summary.
-	profileSummary, err := e.profile.GetSummary()
-	if err != nil {
-		slog.Warn("enrichment: failed to load profile summary", "error", err)
-		profileSummary = ""
+	// 4. Build explicit preferences from the already-loaded profile.
+	// Allocate a fresh slice to avoid appending into p.Preferences' backing array.
+	var explicitPrefs []string
+	if profileLoaded {
+		explicitPrefs = make([]string, 0, len(p.Preferences)+len(p.Opinions))
+		explicitPrefs = append(explicitPrefs, p.Preferences...)
+		explicitPrefs = append(explicitPrefs, p.Opinions...)
 	}
 
 	// 5. Compose enriched request.
-	enriched, err := e.composer.Compose(req, chunks, profileSummary)
+	enriched, err := e.composer.Compose(req, chunks, explicitPrefs, profileSummary)
 	if err != nil {
 		slog.Warn("enrichment: composition failed, forwarding original request", "error", err)
 		out = req

@@ -146,11 +146,19 @@ func runServer() error {
 
 	// Build enrichment pipeline.
 	ollamaEngine := eng
-	extractor := intent.NewExtractor(engine.ChatAdapter(ollamaEngine), cfg.Ollama.FastModel)
+	profileMgr := profile.NewManager(store)
+	calibrationProvider := func() profile.CalibrationContext {
+		cal, err := profileMgr.GetCalibrationContext()
+		if err != nil {
+			slog.Warn("failed to load calibration context, using empty", "error", err)
+			return profile.CalibrationContext{}
+		}
+		return cal
+	}
+	extractor := intent.NewExtractor(engine.ChatAdapter(ollamaEngine), cfg.Ollama.FastModel, calibrationProvider)
 	embedder := retrieval.NewEmbedder(ollamaEngine, cfg.Ollama.EmbedModel)
 	vectorStore := retrieval.NewSQLiteStore(store.DB())
 	retriever := retrieval.NewRetriever(embedder, vectorStore)
-	profileMgr := profile.NewManager(store)
 	comp := composer.New(0)
 	rerankTimeout, err := time.ParseDuration(cfg.Enrichment.RerankingTimeout)
 	if err != nil {
