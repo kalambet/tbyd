@@ -1,5 +1,11 @@
 package profile
 
+// CalibrationContext carries expertise-derived hints for tuning the intent
+// extraction model's output toward the user's known technical background.
+type CalibrationContext struct {
+	Hints string
+}
+
 // Profile represents the user's "digital self" — a structured view of their
 // identity, communication preferences, expertise, interests, and opinions.
 type Profile struct {

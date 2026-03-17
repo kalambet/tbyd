@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/profile"
 )
 
 const systemPromptTemplate = `You are an intent extraction engine. Analyze the user's query and conversation history. Your output must be ONLY a single valid JSON object matching this schema. Do not include any other text, prose, or markdown.
@@ -41,9 +42,15 @@ Rules:
 - Set hybrid_ratio to control the blend: lower values (e.g. 0.3) favor keyword search, higher values (e.g. 0.8) favor vector search.`
 
 // BuildPrompt constructs the Ollama chat messages for intent extraction.
-func BuildPrompt(query string, history []ollama.Message, profileSummary string) []ollama.Message {
+// calibration is injected before the profile section to prime the model with
+// the user's domain expertise before it sees the broader profile summary.
+func BuildPrompt(query string, history []ollama.Message, profileSummary string, calibration profile.CalibrationContext) []ollama.Message {
 	var sb strings.Builder
 	sb.WriteString(systemPromptTemplate)
+
+	if calibration.Hints != "" {
+		fmt.Fprintf(&sb, "\n\n[Calibration]\n%s", calibration.Hints)
+	}
 
 	if profileSummary != "" {
 		fmt.Fprintf(&sb, "\n\n[User Profile]\n%s", profileSummary)

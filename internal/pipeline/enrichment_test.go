@@ -148,7 +148,7 @@ func makeReq(userMsg string) proxy.ChatRequest {
 }
 
 func buildEnricher(chatter *mockChatter, eng *mockEngine, vs *mockVectorStore, ps *mockProfileStore) *Enricher {
-	extractor := intent.NewExtractor(chatter, "test-fast")
+	extractor := intent.NewExtractor(chatter, "test-fast", nil)
 	embedder := retrieval.NewEmbedder(eng, "test-embed")
 	ret := retrieval.NewRetriever(embedder, vs)
 	profileMgr := profile.NewManager(ps)
@@ -169,7 +169,7 @@ func (m *mockReranker) Rerank(ctx context.Context, query string, chunks []retrie
 }
 
 func buildEnricherWith(chatter *mockChatter, eng *mockEngine, vs *mockVectorStore, ps *mockProfileStore, rr reranking.Reranker) *Enricher {
-	extractor := intent.NewExtractor(chatter, "test-fast")
+	extractor := intent.NewExtractor(chatter, "test-fast", nil)
 	embedder := retrieval.NewEmbedder(eng, "test-embed")
 	ret := retrieval.NewRetriever(embedder, vs)
 	profileMgr := profile.NewManager(ps)
@@ -632,7 +632,7 @@ func TestEnrich_CacheHit(t *testing.T) {
 	})
 
 	enricher := NewEnricher(
-		intent.NewExtractor(chatter, "test-fast"),
+		intent.NewExtractor(chatter, "test-fast", nil),
 		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
 		profile.NewManager(ps),
 		composer.New(4000),
@@ -685,7 +685,7 @@ func TestEnrich_CacheMiss(t *testing.T) {
 	qc := cache.NewQueryCacheWithClock(cacheEmb, true, 0.92, 5*time.Minute, 30*time.Minute, clock)
 
 	enricher := NewEnricher(
-		intent.NewExtractor(chatter, "test-fast"),
+		intent.NewExtractor(chatter, "test-fast", nil),
 		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
 		profile.NewManager(ps),
 		composer.New(4000),
@@ -747,7 +747,7 @@ func TestEnrich_CacheInvalidatedOnProfileUpdate(t *testing.T) {
 	profileMgr.OnInvalidate(func() { qc.Invalidate() })
 
 	enricher := NewEnricher(
-		intent.NewExtractor(chatter, "test-fast"),
+		intent.NewExtractor(chatter, "test-fast", nil),
 		retrieval.NewRetriever(retrieval.NewEmbedder(eng, "test-embed"), vs),
 		profileMgr,
 		composer.New(4000),

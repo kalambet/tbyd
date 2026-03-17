@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	"github.com/kalambet/tbyd/internal/ollama"
+	"github.com/kalambet/tbyd/internal/profile"
 )
 
 func TestPromptContainsSchema(t *testing.T) {
-	messages := BuildPrompt("test query", nil, "")
+	messages := BuildPrompt("test query", nil, "", profile.CalibrationContext{})
 
 	system := messages[0].Content
 	for _, field := range []string{"intent_type", "entities", "topics", "context_needs", "is_private", "search_strategy", "hybrid_ratio", "suggested_top_k"} {
@@ -25,7 +26,7 @@ func TestPromptContainsSchema(t *testing.T) {
 }
 
 func TestPromptInjectsProfile(t *testing.T) {
-	messages := BuildPrompt("query", nil, "User: software engineer. Prefers: direct tone.")
+	messages := BuildPrompt("query", nil, "User: software engineer. Prefers: direct tone.", profile.CalibrationContext{})
 
 	system := messages[0].Content
 	if !strings.Contains(system, "direct tone") {
@@ -43,7 +44,7 @@ func TestPromptHistory(t *testing.T) {
 		{Role: "user", Content: "second message"},
 	}
 
-	messages := BuildPrompt("current query", history, "")
+	messages := BuildPrompt("current query", history, "", profile.CalibrationContext{})
 
 	// system + 3 history + 1 user query = 5
 	if len(messages) != 5 {
