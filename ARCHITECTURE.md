@@ -295,7 +295,11 @@ context_docs (
 
 **Phase 3 additions:**
 ```sql
--- 004_synthesis.sql
+-- 004_add_extracted_signals.sql
+ALTER TABLE interactions ADD COLUMN extracted_signals TEXT NOT NULL DEFAULT '';
+CREATE TABLE signal_counts (...);
+
+-- 005_synthesis.sql
 CREATE TABLE pending_profile_deltas (
     id TEXT PRIMARY KEY,
     delta_json TEXT NOT NULL,
@@ -306,7 +310,10 @@ CREATE TABLE pending_profile_deltas (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 
--- 005_retrieval_quality.sql
+-- 006_deep_enrichment.sql
+ALTER TABLE context_docs ADD COLUMN deep_metadata TEXT NOT NULL DEFAULT '{}';
+
+-- 007_retrieval_quality.sql (Issue 3.8)
 ALTER TABLE context_vectors ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;
 ```
 
@@ -581,7 +588,7 @@ jobs (
 - Failed jobs are retried with exponential backoff up to `max_attempts`
 - Completed jobs are retained for 7 days then garbage-collected
 - `ingest_deep_enrich` jobs are **batch-processed**: unlike other job types that are claimed and processed individually, the deep enrichment worker claims up to 5,000 pending jobs per run, groups them by topic similarity, and processes them together in context-window-sized batches. It loops until the queue is drained. On startup, jobs stuck in `running` for longer than 30 minutes are reset to `pending` (with incremented attempt count) to recover from crashes. This worker only activates during idle periods or the scheduled overnight window.
-- **Migration numbering** (current baseline after Phase 2): `001` initial schema, `002_add_fts5.sql`, `003_add_metadata_to_context_docs.sql`. Phase 3 adds: `004_synthesis.sql` (pending_profile_deltas), `005_retrieval_quality.sql` (quality_score on context_vectors). Phase 4 adds: `006_deep_enrichment.sql` (deep_metadata on context_docs).
+- **Migration numbering** (current baseline after Phase 2): `001` initial schema, `002_add_fts5.sql`, `003_add_metadata_to_context_docs.sql`. Phase 3 adds: `004_add_extracted_signals.sql` (extracted_signals + signal_counts), `005_synthesis.sql` (pending_profile_deltas), `006_deep_enrichment.sql` (deep_metadata on context_docs), `007_retrieval_quality.sql` (quality_score on context_vectors).
 
 ---
 
@@ -908,8 +915,8 @@ Each phase has a detailed issue breakdown in `docs/`:
 | Phase 0 | [docs/phase-0-foundation.md](docs/phase-0-foundation.md) | Go scaffold, config, SQLite, Ollama, passthrough proxy |
 | Phase 1 | [docs/phase-1-enrichment.md](docs/phase-1-enrichment.md) | VectorStore, intent extraction, context retrieval, prompt composer |
 | Phase 2 | [docs/phase-2-user-surfaces.md](docs/phase-2-user-surfaces.md) | MCP server, CLI, SwiftUI menubar app, Share Extension |
-| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Interaction ID surfacing, typed Swift model, feedback collection, profile editor, preference learning, nightly synthesis, retrieval quality |
-| Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Deep enrichment pass, browser extension, Feedly sync, content extraction, MLX fine-tuning |
+| Phase 3 | [docs/phase-3-personalization.md](docs/phase-3-personalization.md) | Feedback collection, profile editor, preference learning, nightly synthesis, deep enrichment pass, interaction ID surfacing, retrieval quality, typed Swift model |
+| Phase 4 | [docs/phase-4-extended-ingestion.md](docs/phase-4-extended-ingestion.md) | Browser extension, Feedly sync, content extraction, MLX fine-tuning |
 | Phase 5 | [docs/phase-5-polish-distribution.md](docs/phase-5-polish-distribution.md) | Project rename, onboarding, encryption, Homebrew, App Store |
 
 ### Phase 0 — Foundation
@@ -954,17 +961,17 @@ Each phase has a detailed issue breakdown in `docs/`:
 - [x] **2.10** Menubar app: `PreferencesViewModelTests` and `StatusView` extraction
 
 ### Phase 3 — Personalization
-- [ ] **3.7** Interaction ID surfacing in API responses (prerequisite for 3.1 MCP tool)
-- [ ] **3.9** Typed Swift `Profile` model in TBYDKit (prerequisite for 3.2 SwiftUI editor)
-- [ ] **3.1** Feedback collection API and UI
-- [ ] **3.2** User profile editor (explicit digital self)
-- [ ] **3.3** Preference extraction from feedback (background job)
-- [ ] **3.4** Profile injection into enrichment pipeline (calibration)
-- [ ] **3.5** Nightly profile synthesis (deep model background pass)
+- [x] **3.1** Feedback collection API and UI
+- [x] **3.2** User profile editor (explicit digital self)
+- [x] **3.3** Preference extraction from feedback (background job)
+- [x] **3.4** Profile injection into enrichment pipeline (calibration)
+- [x] **3.5** Nightly profile synthesis (deep model background pass)
+- [x] **3.6** Deep enrichment pass (two-pass ingestion: batched deep model processing, idle/overnight trigger, topic-aware grouping, additive metadata updates)
+- [ ] **3.7** Interaction ID surfacing in API responses (prerequisite for MCP rate_response tool)
 - [ ] **3.8** Retrieval quality feedback loop (chunk quality scores from thumbs-down)
+- [x] **3.9** Typed Swift `Profile` model in TBYDKit (completed as part of 3.2)
 
 ### Phase 4 — Extended Ingestion & Model Tuning
-- [ ] **4.0** Deep enrichment pass (two-pass ingestion: batched deep model processing, idle/overnight trigger, topic-aware grouping, additive metadata updates)
 - [ ] **4.1** Browser extension (Safari + Chrome)
 - [ ] **4.2** Feedly integration (OAuth + periodic sync)
 - [ ] **4.3** Content extraction improvements (PDF chunking, OCR, HTML)

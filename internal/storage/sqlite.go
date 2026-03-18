@@ -452,11 +452,15 @@ func (s *Store) SaveContextDoc(doc ContextDoc) error {
 	if metadata == "" {
 		metadata = "{}"
 	}
+	deepMetadata := doc.DeepMetadata
+	if deepMetadata == "" {
+		deepMetadata = "{}"
+	}
 	_, err := s.db.Exec(`
-		INSERT INTO context_docs (id, title, content, source, tags, created_at, vector_id, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO context_docs (id, title, content, source, tags, created_at, vector_id, metadata, deep_metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		doc.ID, doc.Title, doc.Content, doc.Source, doc.Tags,
-		doc.CreatedAt.UTC().Format(time.RFC3339), doc.VectorID, metadata,
+		doc.CreatedAt.UTC().Format(time.RFC3339), doc.VectorID, metadata, deepMetadata,
 	)
 	return err
 }
@@ -465,9 +469,9 @@ func (s *Store) GetContextDoc(id string) (ContextDoc, error) {
 	var d ContextDoc
 	var createdAt string
 	err := s.db.QueryRow(`
-		SELECT id, title, content, source, tags, created_at, vector_id, metadata
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata, deep_metadata
 		FROM context_docs WHERE id = ?`, id,
-	).Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata)
+	).Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata, &d.DeepMetadata)
 	if err == sql.ErrNoRows {
 		return ContextDoc{}, ErrNotFound
 	}
@@ -484,7 +488,7 @@ func (s *Store) GetContextDoc(id string) (ContextDoc, error) {
 
 func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, content, source, tags, created_at, vector_id, metadata
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata, deep_metadata
 		FROM context_docs ORDER BY created_at DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -496,7 +500,7 @@ func (s *Store) ListContextDocs(limit int) ([]ContextDoc, error) {
 	for rows.Next() {
 		var d ContextDoc
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata, &d.DeepMetadata); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)
@@ -715,7 +719,7 @@ func (s *Store) ListInteractions(limit, offset int) ([]Interaction, error) {
 
 func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, content, source, tags, created_at, vector_id, metadata
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata, deep_metadata
 		FROM context_docs ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset,
 	)
 	if err != nil {
@@ -727,7 +731,7 @@ func (s *Store) ListContextDocsPaginated(limit, offset int) ([]ContextDoc, error
 	for rows.Next() {
 		var d ContextDoc
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata, &d.DeepMetadata); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)
@@ -782,6 +786,202 @@ func (s *Store) CountInteractions() (int, error) {
 	return count, err
 }
 
+// UpdateContextDocTagsAndDeepMetadata updates tags and deep_metadata atomically.
+func (s *Store) UpdateContextDocTagsAndDeepMetadata(id, tags, deepMetadataJSON string) error {
+	res, err := s.db.Exec(`UPDATE context_docs SET tags = ?, deep_metadata = ? WHERE id = ?`, tags, deepMetadataJSON, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClaimJobs claims up to limit pending jobs of the given types in a single transaction.
+// The transaction is required: it ensures the SELECT + UPDATE pair is atomic so no
+// two workers can claim the same job (prevents double-processing on concurrent calls).
+// Returns the claimed jobs with status set to "running".
+func (s *Store) ClaimJobs(types []string, limit int) ([]Job, error) {
+	if len(types) == 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
+	placeholders := strings.Repeat(",?", len(types)-1)
+	query := `SELECT id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at, last_error
+		FROM jobs
+		WHERE status = 'pending' AND run_after <= ? AND type IN (?` + placeholders + `)
+		ORDER BY run_after ASC, created_at ASC
+		LIMIT ?`
+
+	args := make([]any, 0, len(types)+2)
+	args = append(args, now)
+	for _, t := range types {
+		args = append(args, t)
+	}
+	args = append(args, limit)
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning claim transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("selecting pending jobs: %w", err)
+	}
+
+	var jobs []Job
+	for rows.Next() {
+		var j Job
+		var runAfter, createdAt, updatedAt string
+		var lastError sql.NullString
+		if err := rows.Scan(
+			&j.ID, &j.Type, &j.PayloadJSON, &j.Status, &j.Attempts, &j.MaxAttempts,
+			&runAfter, &createdAt, &updatedAt, &lastError,
+		); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scanning job row: %w", err)
+		}
+		j.LastError = lastError.String
+		var parseErr error
+		if j.RunAfter, parseErr = time.Parse(time.RFC3339, runAfter); parseErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("parsing run_after: %w", parseErr)
+		}
+		if j.CreatedAt, parseErr = time.Parse(time.RFC3339, createdAt); parseErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("parsing created_at: %w", parseErr)
+		}
+		jobs = append(jobs, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating job rows: %w", err)
+	}
+
+	// Mark each selected job as running.
+	for i := range jobs {
+		res, err := tx.Exec(
+			`UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'pending'`,
+			now, jobs[i].ID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("claiming job %s: %w", jobs[i].ID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("checking claimed rows for job %s: %w", jobs[i].ID, err)
+		}
+		if n == 1 {
+			jobs[i].Status = "running"
+			jobs[i].UpdatedAt = nowTime
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing claim transaction: %w", err)
+	}
+
+	// Return only successfully claimed jobs (status == "running").
+	claimed := jobs[:0]
+	for _, j := range jobs {
+		if j.Status == "running" {
+			claimed = append(claimed, j)
+		}
+	}
+	return claimed, nil
+}
+
+// ResetStaleJobs resets jobs stuck in 'running' for longer than timeout back to 'pending'.
+// Jobs that have exceeded max_attempts are set to 'failed' instead.
+// Returns the count of jobs reset.
+func (s *Store) ResetStaleJobs(jobTypes []string, timeout time.Duration) (int, error) {
+	if len(jobTypes) == 0 {
+		return 0, nil
+	}
+
+	threshold := time.Now().UTC().Add(-timeout).Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	placeholders := strings.Repeat(",?", len(jobTypes)-1)
+
+	// Select stale running jobs.
+	query := `SELECT id, attempts, max_attempts FROM jobs
+		WHERE status = 'running' AND type IN (?` + placeholders + `) AND updated_at < ?`
+
+	args := make([]any, 0, len(jobTypes)+1)
+	for _, t := range jobTypes {
+		args = append(args, t)
+	}
+	args = append(args, threshold)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("querying stale jobs: %w", err)
+	}
+
+	type staleJob struct {
+		id          string
+		attempts    int
+		maxAttempts int
+	}
+	var stale []staleJob
+	for rows.Next() {
+		var j staleJob
+		if err := rows.Scan(&j.id, &j.attempts, &j.maxAttempts); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scanning stale job: %w", err)
+		}
+		stale = append(stale, j)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterating stale jobs: %w", err)
+	}
+
+	if len(stale) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("beginning reset transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	resetCount := 0
+	for _, j := range stale {
+		newAttempts := j.attempts + 1
+		var newStatus string
+		if newAttempts >= j.maxAttempts {
+			newStatus = "failed"
+		} else {
+			newStatus = "pending"
+		}
+		_, err := tx.Exec(
+			`UPDATE jobs SET status = ?, attempts = ?, updated_at = ? WHERE id = ? AND status = 'running'`,
+			newStatus, newAttempts, now, j.id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("resetting stale job %s: %w", j.id, err)
+		}
+		resetCount++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing stale job reset: %w", err)
+	}
+	return resetCount, nil
+}
+
 // --- Time-windowed queries ---
 
 // GetInteractionsWithFeedbackSince returns interactions that have a non-zero
@@ -819,7 +1019,7 @@ func (s *Store) GetInteractionsWithFeedbackSince(since time.Time) ([]Interaction
 // GetContextDocsSince returns context docs created at or after since, ordered by most recent first.
 func (s *Store) GetContextDocsSince(since time.Time) ([]ContextDoc, error) {
 	rows, err := s.db.Query(`
-		SELECT id, title, content, source, tags, created_at, vector_id, metadata
+		SELECT id, title, content, source, tags, created_at, vector_id, metadata, deep_metadata
 		FROM context_docs
 		WHERE created_at >= ?
 		ORDER BY created_at DESC`,
@@ -834,7 +1034,7 @@ func (s *Store) GetContextDocsSince(since time.Time) ([]ContextDoc, error) {
 	for rows.Next() {
 		var d ContextDoc
 		var createdAt string
-		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata); err != nil {
+		if err := rows.Scan(&d.ID, &d.Title, &d.Content, &d.Source, &d.Tags, &createdAt, &d.VectorID, &d.Metadata, &d.DeepMetadata); err != nil {
 			return nil, err
 		}
 		t, err := time.Parse(time.RFC3339, createdAt)

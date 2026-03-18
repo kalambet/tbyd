@@ -38,14 +38,15 @@ type Job struct {
 }
 
 type ContextDoc struct {
-	ID        string
-	Title     string
-	Content   string
-	Source    string
-	Tags      string // JSON array stored as text
-	CreatedAt time.Time
-	VectorID  string
-	Metadata  string // JSON object stored as text
+	ID           string
+	Title        string
+	Content      string
+	Source       string
+	Tags         string // JSON array stored as text
+	CreatedAt    time.Time
+	VectorID     string
+	Metadata     string // JSON object stored as text
+	DeepMetadata string // JSON object stored as text; populated by the deep enrichment pass
 }
 
 // PendingProfileDelta is a proposed change to the user profile waiting for

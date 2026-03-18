@@ -238,17 +238,39 @@ func runServer() error {
 	go nightlySynth.ProcessJobs(ctx, 30*time.Second)
 	go nightlySynth.Schedule(ctx, 24*time.Hour)
 
+	// Build and start deep enrichment worker (if enabled).
+	if cfg.Enrichment.DeepEnabled {
+		deepModel := cfg.Ollama.DeepModel
+		if deepModel == "" {
+			deepModel = cfg.Ollama.FastModel
+		}
+		deepEnricher := synthesis.NewDeepEnricher(engine.ChatAdapter(ollamaEngine), deepModel)
+		deepBatcher := synthesis.NewBatcher(synthesis.DefaultContextWindowTokens)
+		deepIdle := synthesis.NewIdleDetector(cfg.Enrichment.DeepIdleCPUMaxPct, cfg.Enrichment.DeepIdleMemMinGB)
+		deepWorker := synthesis.NewDeepEnrichmentWorker(store, deepEnricher, deepBatcher, deepIdle, cfg.Enrichment.DeepBatchClaimLimit)
+		scheduledHour := 2 // default
+		if h, err := parseScheduleHour(cfg.Enrichment.DeepSchedule); err == nil {
+			scheduledHour = h
+		} else {
+			slog.Info("invalid deep enrichment schedule, defaulting to 02:00 UTC",
+				"schedule", cfg.Enrichment.DeepSchedule, "error", err)
+		}
+		go deepWorker.Schedule(ctx, 5*time.Minute, scheduledHour)
+		slog.Info("deep enrichment worker started", "model", deepModel, "schedule", cfg.Enrichment.DeepSchedule)
+	}
+
 	// Build HTTP handler and server.
 	proxyClient := proxy.NewClient(cfg.Proxy.OpenRouterAPIKey)
 	onboarding := api.NewOnboardingNotifier(&serverOnboardingConfig{cfg: cfg})
 	openaiHandler, waitSaveLoop := api.NewOpenAIHandler(ctx, proxyClient, enricher, store, cfg.Storage.SaveInteractions, enqueueSummarize, onboarding)
 	appHandler := api.NewAppHandler(api.AppDeps{
-		Store:      store,
-		Profile:    profileMgr,
-		Token:      apiToken,
-		HTTPClient: &http.Client{Timeout: 15 * time.Second},
-		Vectors:    vectorStore,
-		Retriever:  retriever,
+		Store:             store,
+		Profile:           profileMgr,
+		Token:             apiToken,
+		HTTPClient:        &http.Client{Timeout: 15 * time.Second},
+		Vectors:           vectorStore,
+		Retriever:         retriever,
+		DeepEnrichEnabled: cfg.Enrichment.DeepEnabled,
 	})
 
 	// Compose top-level router: OpenAI-compat routes + management/ingest routes.
@@ -273,11 +295,12 @@ func runServer() error {
 		},
 	}
 	mcpSrv := api.NewMCPServer(api.MCPDeps{
-		Store:     store,
-		Profile:   profileMgr,
-		Retriever: retriever,
-		Engine:    mcpEngine,
-		DeepModel: cfg.Ollama.DeepModel,
+		Store:             store,
+		Profile:           profileMgr,
+		Retriever:         retriever,
+		Engine:            mcpEngine,
+		DeepModel:         cfg.Ollama.DeepModel,
+		DeepEnrichEnabled: cfg.Enrichment.DeepEnabled,
 	})
 	stdioSrv := server.NewStdioServer(mcpSrv)
 	go func() {
@@ -489,6 +512,21 @@ func (s *serverOnboardingConfig) OnboardingShown() bool {
 
 func (s *serverOnboardingConfig) MarkOnboardingShown() error {
 	return config.SetKey("storage.onboarding_shown", "true")
+}
+
+// parseScheduleHour parses a schedule string like "2:00" or "14:30" and returns
+// the hour component (0–23). Only hour-level granularity is used; if minutes
+// are non-zero, a warning is emitted. Returns an error if the format is unrecognised.
+func parseScheduleHour(schedule string) (int, error) {
+	t, err := time.Parse("15:04", schedule)
+	if err != nil {
+		return 0, fmt.Errorf("invalid schedule format %q (expected HH:MM): %w", schedule, err)
+	}
+	if t.Minute() != 0 {
+		slog.Warn("deep enrichment schedule minutes ignored; only hour-level granularity is supported",
+			"schedule", schedule, "effective_hour", t.Hour())
+	}
+	return t.Hour(), nil
 }
 
 // engineChatAdapter wraps engine.Engine to satisfy ingest.ChatEngine.

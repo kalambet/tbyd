@@ -327,6 +327,137 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 
 ---
 
+## Issue 3.7 — Interaction ID surfacing in API responses
+
+**Context:** The feedback loop (Issue 3.1) relies on users knowing _which_ interaction to rate. The MCP `rate_response` tool and `tbyd interactions rate` CLI command both take an `interaction_id` argument, but there is currently no mechanism for callers of the OpenAI-compatible proxy API to discover this ID from the response itself. Without surfacing the ID, only users who manually browse the data browser or interaction list can provide feedback — making the feedback loop impractical for the primary use case (Cursor, Continue.dev, and other OpenAI-compat clients that stream responses).
+
+This issue adds the interaction ID to both streaming and non-streaming responses using mechanisms that are invisible to clients that don't consume them.
+
+**Prerequisites:** Issue 3.1 (feedback collection) must be implemented first so the surfaced ID has a consumer.
+
+**Tasks:**
+- Move interaction ID generation from `doSaveInteraction` (async, post-response) to the request handler (synchronous, pre-response):
+  - Generate `interactionID := uuid.New().String()` at the start of `handleChatCompletions`, before the cloud dispatch
+  - Thread it through `interactionRecord` so the save goroutine uses the same ID rather than generating a new one
+  - This ensures the ID is available before the response is written
+- Add non-streaming response header:
+  - After reading the upstream response body but before writing it to the client, set `w.Header().Set("X-TBYD-Interaction-ID", interactionID)`
+  - The header is harmless to clients that don't consume it
+- Add streaming SSE metadata event:
+  - After all content chunks have been forwarded and before emitting `data: [DONE]`, emit a custom SSE event:
+    ```
+    event: tbyd-metadata
+    data: {"interaction_id":"<uuid>"}
+
+    ```
+  - Per the SSE spec, clients that do not register a handler for the `tbyd-metadata` event type silently ignore it — this is safe for all existing OpenAI-compat clients
+  - Modify `streamResponseCapture` to accept the `interactionID` parameter and inject the event at the appropriate point
+- Update the `interactionRecord` struct to include the pre-generated `interactionID`:
+  - Add `InteractionID string` field
+  - Update `doSaveInteraction` to use `rec.InteractionID` instead of generating a new UUID
+- Only surface the ID when `save_interactions` is enabled:
+  - If interactions are not being saved, there is no ID to surface and no feedback to give
+  - When save is disabled, omit the header and SSE event entirely (don't generate a UUID that leads nowhere)
+- Update CLI `tbyd interactions list` output to show the interaction ID prominently, so users can cross-reference the surfaced ID with stored interactions
+
+**Unit tests** (`internal/api/openai_test.go`):
+- `TestChatCompletions_NonStreaming_SurfacesInteractionID` — make a non-streaming chat request with save enabled; verify `X-TBYD-Interaction-ID` header is present in the response; verify the header value is a valid UUID
+- `TestChatCompletions_NonStreaming_NoIDWhenSaveDisabled` — make a non-streaming chat request with save disabled; verify `X-TBYD-Interaction-ID` header is absent
+- `TestChatCompletions_Streaming_SurfacesInteractionID` — make a streaming chat request with save enabled; parse SSE events; verify a `tbyd-metadata` event appears after content chunks and before `[DONE]`; verify it contains a valid `interaction_id` JSON field
+- `TestChatCompletions_Streaming_NoMetadataWhenSaveDisabled` — make a streaming chat request with save disabled; verify no `tbyd-metadata` event in the SSE stream
+- `TestChatCompletions_InteractionID_MatchesSavedRecord` — make a chat request with save enabled; capture the surfaced interaction ID from the response header; query the store for that ID; verify the stored interaction exists and has the correct `UserQuery`
+- `TestChatCompletions_Streaming_MetadataEventFormat` — verify the SSE event uses `event: tbyd-metadata\ndata: {...}\n\n` format exactly (not `event: message` or bare `data:`)
+- `TestChatCompletions_InteractionID_IsUUID` — verify the surfaced ID passes `uuid.Parse()` without error
+
+**Acceptance criteria:**
+- A non-streaming request to `/v1/chat/completions` returns `X-TBYD-Interaction-ID: <uuid>` in the response headers
+- A streaming request includes `event: tbyd-metadata\ndata: {"interaction_id":"<uuid>"}\n\n` after content chunks and before `data: [DONE]`
+- The surfaced ID matches the interaction stored in SQLite — `tbyd interactions rate <id>` works immediately with the surfaced ID
+- Clients that do not handle `X-TBYD-Interaction-ID` or `tbyd-metadata` see no behavioral difference (backward compatible)
+- When `save_interactions` is false, no ID is surfaced and no UUID is generated
+- `go test ./internal/api/...` passes
+
+---
+
+## Issue 3.8 — Retrieval quality feedback loop (chunk quality scores)
+
+**Context:** When a user rates a response negatively (thumbs-down via Issue 3.1), the feedback is stored and eventually processed by the preference extraction pipeline (Issue 3.3). However, negative feedback often means the retrieved context was irrelevant or misleading — the wrong chunks were injected into the prompt. Currently, there is no mechanism to degrade the retrieval ranking of bad chunks. A chunk that was irrelevant once will score equally high next time.
+
+This issue adds a `quality_score` column to `context_vectors` that is multiplied into the final retrieval score. Negative feedback decrements the score of every chunk that was used in that interaction; positive feedback increments it. Over time, consistently poor chunks sink in ranking without being deleted, and consistently useful chunks rise. This is a lightweight, immediate-effect mechanism that improves retrieval quality _before_ Phase 4 fine-tuning.
+
+**Prerequisites:** Issue 3.7 (interaction ID surfacing) is recommended so users can actually provide feedback, but the scoring machinery can be built and tested independently.
+
+**Tasks:**
+- Add migration `007_retrieval_quality.sql`:
+  ```sql
+  ALTER TABLE context_vectors ADD COLUMN quality_score REAL NOT NULL DEFAULT 1.0;
+  ```
+- Record which vector IDs were used per interaction:
+  - The enrichment pipeline already tracks `meta.ChunksUsed` (vector IDs used after retrieval + reranking)
+  - Thread `ChunksUsed` through `interactionRecord` and into `doSaveInteraction`, storing the JSON array in the existing `vector_ids` column on the `interactions` table
+  - Currently `vector_ids` is always `"[]"` for OpenAI-compat interactions (only the ingest worker populates it); this change makes it useful
+- Implement quality score adjustment in `internal/retrieval/quality.go`:
+  - `AdjustQualityScores(db *sql.DB, vectorIDs []string, positive bool) error`
+  - On negative feedback (`positive=false`): decrement each vector's `quality_score` by 0.1
+  - On positive feedback (`positive=true`): increment each vector's `quality_score` by 0.05
+  - Asymmetric adjustment: negative signal is stronger because bad context is more damaging than good context is helpful
+  - Clamp to `[0.1, 2.0]` — never zero (chunk is still retrievable, just heavily penalized) and never unbounded
+  - Use a single `UPDATE` statement with `MIN`/`MAX` clamping:
+    ```sql
+    UPDATE context_vectors
+    SET quality_score = MIN(2.0, MAX(0.1, quality_score + ?))
+    WHERE id IN (?, ?, ...)
+    ```
+- Integrate quality score into retrieval scoring:
+  - In `SQLiteStore.Search()`: after computing cosine similarity, multiply by the vector's `quality_score` before inserting into the top-K heap
+  - This requires reading `quality_score` alongside `embedding` in the scan loop: `SELECT id, embedding, quality_score FROM context_vectors`
+  - In `SQLiteStore.SearchHybrid()`: apply the same multiplier to the blended score
+  - In `SQLiteStore.SearchKeyword()`: apply the multiplier to BM25 scores
+  - The `ScoredRecord.Score` field already carries the final score; the multiplier is transparent to callers
+- Wire quality adjustment into the feedback handler:
+  - In `internal/api/feedback.go` `handlePostFeedback`: after saving the feedback score, load the interaction's `vector_ids`, parse the JSON array, and call `AdjustQualityScores`
+  - Only adjust when `vector_ids` is non-empty and not `"[]"`
+  - Log the adjustment at `debug` level (vector IDs, direction, count)
+- Wire quality adjustment into MCP `rate_response` tool:
+  - Same logic as the REST feedback handler — after saving feedback, adjust quality scores for the interaction's vector IDs
+
+**Unit tests** (`internal/retrieval/quality_test.go`):
+- `TestAdjustQualityScores_NegativeDecrement` — insert 3 vectors with default quality_score 1.0; call `AdjustQualityScores(ids, false)`; verify all three have quality_score 0.9
+- `TestAdjustQualityScores_PositiveIncrement` — insert 2 vectors; call `AdjustQualityScores(ids, true)`; verify quality_score is 1.05
+- `TestAdjustQualityScores_ClampLow` — set quality_score to 0.15; call negative adjust; verify clamped to 0.1 (not 0.05)
+- `TestAdjustQualityScores_ClampHigh` — set quality_score to 1.98; call positive adjust; verify clamped to 2.0 (not 2.03)
+- `TestAdjustQualityScores_EmptyIDs` — call with empty slice; verify no error, no changes
+- `TestAdjustQualityScores_NonexistentID` — call with unknown vector ID; verify no error (no rows affected, not an error condition)
+- `TestAdjustQualityScores_RepeatedNegative` — apply negative 15 times; verify quality_score bottoms at 0.1, never goes below
+
+**Unit tests** (`internal/retrieval/store_test.go` — extend):
+- `TestSearch_QualityScoreMultiplier` — insert 2 vectors with identical embeddings; set one to quality_score 0.5; search; verify the high-quality vector ranks first despite identical cosine similarity
+- `TestSearch_QualityScoreDefault` — insert vector without explicit quality_score; verify it defaults to 1.0 and search results are unaffected
+- `TestSearchHybrid_QualityScoreApplied` — insert 2 vectors; set quality_score 0.3 on one; run hybrid search; verify low-quality vector ranks lower
+- `TestSearchKeyword_QualityScoreApplied` — same test for keyword-only search path
+
+**Unit tests** (`internal/api/feedback_test.go` — extend):
+- `TestFeedback_Negative_AdjustsQualityScores` — save interaction with `vector_ids: ["v1","v2"]`; POST negative feedback; verify `AdjustQualityScores` called with `["v1","v2"]` and `positive=false`
+- `TestFeedback_Positive_AdjustsQualityScores` — same for positive feedback
+- `TestFeedback_NoVectorIDs_SkipsAdjustment` — interaction has `vector_ids: "[]"`; POST feedback; verify no quality score adjustment attempted
+
+**Acceptance criteria:**
+- Giving thumbs-down to a response reduces the quality_score of the chunks that were used in that response by 0.1 each
+- Giving thumbs-up increases the quality_score by 0.05 each
+- After 5 thumbs-down on responses that used chunk X, chunk X's quality_score is 0.5 — it ranks significantly lower in future retrievals than a fresh chunk with quality_score 1.0
+- quality_score never drops below 0.1 (chunk remains retrievable) or exceeds 2.0
+- A chunk with quality_score 0.1 and cosine similarity 0.95 ranks below a chunk with quality_score 1.0 and cosine similarity 0.5 (0.095 < 0.5)
+- The quality adjustment is immediate — no background job or synthesis pass required
+- `go test ./internal/retrieval/...` and `go test ./internal/api/...` pass
+
+---
+
+## ~~Issue 3.9 — Typed Swift `Profile` model in TBYDKit~~
+
+> **Completed.** Implemented as part of Issue 3.2 (user profile editor). See `macos/Sources/TBYDKit/Profile.swift` for the `Profile` (read model), `ProfilePatch` (write model with flat dot-notation encoding), `NullableField` (three-state optional for PATCH semantics), and `ProfilePatch.build(from:current:)` (diff-based patch builder).
+
+---
+
 ## Phase 3 Verification
 
 1. Rate 5 consecutive responses as negative because they were "too long" → check if a "concise" preference appears in profile after synthesis
@@ -339,5 +470,12 @@ Raw content is always preserved in `context_docs.content` after pass 1. Pass 2 r
 8. Manually trigger deep enrichment → verify `context_docs` metadata updated with richer extraction, pass 1 data preserved
 9. Ingest 20 documents with mixed topics → trigger deep enrichment → verify topic-aware batching groups related documents
 10. Disable deep enrichment (`enrichment.deep_enabled = false`) → ingest a document → verify no `ingest_deep_enrich` job created
-11. `go test ./...` passes
-12. `go test -tags integration ./...` passes
+11. Non-streaming request to `/v1/chat/completions` with `save_interactions=true` → verify `X-TBYD-Interaction-ID` header in response
+12. Streaming request → verify `event: tbyd-metadata` SSE event appears after content chunks, before `[DONE]`, containing the interaction ID
+13. Use the surfaced interaction ID with `tbyd interactions rate <id> --negative` → verify feedback stored against the correct interaction
+14. Disable `save_interactions` → verify no `X-TBYD-Interaction-ID` header or `tbyd-metadata` event in responses
+15. Give 5 thumbs-down to responses that used chunk X → verify chunk X's `quality_score` dropped to 0.5 → query again → verify chunk X ranks lower than before
+16. Give thumbs-up to a response → verify chunk quality_score incremented by 0.05
+17. Verify quality_score stays within [0.1, 2.0] bounds after extreme positive/negative feedback
+18. `go test ./...` passes
+19. `go test -tags integration ./...` passes
