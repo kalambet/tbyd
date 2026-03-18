@@ -518,18 +518,15 @@ func (s *serverOnboardingConfig) MarkOnboardingShown() error {
 // the hour component (0–23). Only hour-level granularity is used; if minutes
 // are non-zero, a warning is emitted. Returns an error if the format is unrecognised.
 func parseScheduleHour(schedule string) (int, error) {
-	var h, m int
-	if _, err := fmt.Sscanf(schedule, "%d:%d", &h, &m); err != nil {
+	t, err := time.Parse("15:04", schedule)
+	if err != nil {
 		return 0, fmt.Errorf("invalid schedule format %q (expected HH:MM): %w", schedule, err)
 	}
-	if h < 0 || h > 23 {
-		return 0, fmt.Errorf("hour %d out of range [0,23]", h)
-	}
-	if m != 0 {
+	if t.Minute() != 0 {
 		slog.Warn("deep enrichment schedule minutes ignored; only hour-level granularity is supported",
-			"schedule", schedule, "effective_hour", h)
+			"schedule", schedule, "effective_hour", t.Hour())
 	}
-	return h, nil
+	return t.Hour(), nil
 }
 
 // engineChatAdapter wraps engine.Engine to satisfy ingest.ChatEngine.

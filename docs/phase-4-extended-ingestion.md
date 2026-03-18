@@ -1,10 +1,12 @@
 # Phase 4 — Extended Ingestion & Local Model Tuning
 
-> **Goal:** Complete the two-pass ingestion model with deep enrichment, broaden the data pipeline to capture content from RSS readers (Feedly), browser extensions (Safari + Chrome), and prepare the fine-tuning infrastructure. The local model starts improving based on the accumulated user corpus.
+> **Goal:** Broaden the data pipeline to capture content from RSS readers (Feedly), browser extensions (Safari + Chrome), and prepare the fine-tuning infrastructure. The local model starts improving based on the accumulated user corpus. (Deep enrichment was moved to Phase 3 as Issue 3.6.)
 
 ---
 
-## Issue 4.0 — Deep enrichment pass (two-pass ingestion model)
+## ~~Issue 4.0 — Deep enrichment pass (two-pass ingestion model)~~
+
+> **Moved to Phase 3 as Issue 3.6.** Implemented in PR #37. The spec below is superseded by `docs/phase-3-personalization.md § Issue 3.6`.
 
 **Context:** The fast model (phi3.5) provides instant searchability on ingestion, but the deep model (mistral-nemo) produces significantly better extraction — better entity disambiguation, cross-document reasoning, domain classification, and key point extraction. This issue implements the second pass of the two-pass ingestion model: a batched deep enrichment that runs when the machine is idle or overnight.
 
