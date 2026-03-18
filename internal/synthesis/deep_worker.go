@@ -106,14 +106,7 @@ func (w *DeepEnrichmentWorker) Run(ctx context.Context) error {
 
 	for _, job := range jobs {
 		if ctx.Err() != nil {
-			// Context cancelled — fail remaining unprocessed jobs.
-			for _, j := range jobs {
-				if _, done := processedJobIDs[j.ID]; !done {
-					_ = w.store.FailJob(j.ID, "context cancelled before processing")
-					processedJobIDs[j.ID] = struct{}{}
-				}
-			}
-			return ctx.Err()
+			break
 		}
 
 		var payload deepEnrichPayload
@@ -133,6 +126,25 @@ func (w *DeepEnrichmentWorker) Run(ctx context.Context) error {
 		}
 
 		docRefs = append(docRefs, jobRef{jobID: job.ID, doc: doc})
+	}
+
+	// If context was cancelled during doc loading, fail any jobs that were
+	// neither loaded into docRefs nor already individually failed above.
+	if ctx.Err() != nil {
+		loadedJobIDs := make(map[string]struct{}, len(docRefs))
+		for _, ref := range docRefs {
+			loadedJobIDs[ref.jobID] = struct{}{}
+		}
+		for _, j := range jobs {
+			if _, done := processedJobIDs[j.ID]; done {
+				continue
+			}
+			if _, loaded := loadedJobIDs[j.ID]; loaded {
+				continue
+			}
+			_ = w.store.FailJob(j.ID, "context cancelled before processing")
+		}
+		return ctx.Err()
 	}
 
 	if len(docRefs) == 0 {

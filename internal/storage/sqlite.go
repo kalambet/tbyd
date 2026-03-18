@@ -811,7 +811,8 @@ func (s *Store) ClaimJobs(types []string, limit int) ([]Job, error) {
 		return nil, nil
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
 	placeholders := strings.Repeat(",?", len(types)-1)
 	query := `SELECT id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at, last_error
 		FROM jobs
@@ -881,7 +882,7 @@ func (s *Store) ClaimJobs(types []string, limit int) ([]Job, error) {
 		}
 		if n == 1 {
 			jobs[i].Status = "running"
-			jobs[i].UpdatedAt = time.Now().UTC()
+			jobs[i].UpdatedAt = nowTime
 		}
 	}
 

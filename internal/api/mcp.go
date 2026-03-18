@@ -229,12 +229,12 @@ func mcpAddContext(deps MCPDeps) server.ToolHandlerFunc {
 			return mcpError(fmt.Sprintf("failed to save: %v", err)), nil
 		}
 
-		if err := enqueueEnrichment(ctx, deps.Store, docID); err != nil {
+		if err := enqueueIngestJob(ctx, deps.Store, "ingest_enrich", docID, 3); err != nil {
 			return mcpError(fmt.Sprintf("saved doc but failed to queue enrichment: %v", err)), nil
 		}
 
 		if deps.DeepEnrichEnabled {
-			if err := enqueueDeepEnrichment(ctx, deps.Store, docID); err != nil {
+			if err := enqueueIngestJob(ctx, deps.Store, "ingest_deep_enrich", docID, 3); err != nil {
 				// Non-fatal: pass 1 enrichment is sufficient.
 				slog.Warn("mcp: failed to enqueue deep enrichment job", "doc_id", docID, "error", err)
 			}
@@ -371,12 +371,12 @@ func mcpSummarizeSession(deps MCPDeps) server.ToolHandlerFunc {
 			return mcpError(fmt.Sprintf("summary generated but failed to save: %v", err)), nil
 		}
 
-		if err := enqueueEnrichment(ctx, deps.Store, docID); err != nil {
+		if err := enqueueIngestJob(ctx, deps.Store, "ingest_enrich", docID, 3); err != nil {
 			return mcpError(fmt.Sprintf("summary saved but failed to queue enrichment: %v", err)), nil
 		}
 
 		if deps.DeepEnrichEnabled {
-			if err := enqueueDeepEnrichment(ctx, deps.Store, docID); err != nil {
+			if err := enqueueIngestJob(ctx, deps.Store, "ingest_deep_enrich", docID, 3); err != nil {
 				// Non-fatal: pass 1 enrichment is sufficient.
 				slog.Warn("mcp: failed to enqueue deep enrichment job for session summary", "doc_id", docID, "error", err)
 			}
@@ -488,29 +488,16 @@ func mcpResourceRecent(deps MCPDeps) server.ResourceHandlerFunc {
 	}
 }
 
-func enqueueEnrichment(ctx context.Context, store *storage.Store, docID string) error {
+func enqueueIngestJob(ctx context.Context, store *storage.Store, jobType, docID string, maxAttempts int) error {
 	payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
 	if err != nil {
-		return fmt.Errorf("failed to marshal enrichment payload: %w", err)
+		return fmt.Errorf("failed to marshal %s payload: %w", jobType, err)
 	}
 	job := storage.Job{
 		ID:          uuid.New().String(),
-		Type:        "ingest_enrich",
+		Type:        jobType,
 		PayloadJSON: string(payload),
-	}
-	return store.EnqueueJob(ctx, job)
-}
-
-func enqueueDeepEnrichment(ctx context.Context, store *storage.Store, docID string) error {
-	payload, err := json.Marshal(map[string]string{"context_doc_id": docID})
-	if err != nil {
-		return fmt.Errorf("failed to marshal deep enrichment payload: %w", err)
-	}
-	job := storage.Job{
-		ID:          uuid.New().String(),
-		Type:        "ingest_deep_enrich",
-		PayloadJSON: string(payload),
-		MaxAttempts: 3,
+		MaxAttempts: maxAttempts,
 	}
 	return store.EnqueueJob(ctx, job)
 }
