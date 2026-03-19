@@ -323,7 +323,7 @@ func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interact
 	if err := saver.SaveInteraction(ctx, interaction); err != nil {
 		slog.Error("failed to save interaction",
 			"error", err,
-			"ephemeral_id", interactionID,
+			"interaction_id", interactionID,
 			"model", rec.Model,
 		)
 		return
@@ -387,12 +387,12 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader, interactionID st
 					// Inject tbyd-metadata event before [DONE] when save is enabled.
 					if interactionID != "" {
 						metaPayload, err := json.Marshal(map[string]string{"interaction_id": interactionID})
-					if err != nil {
-						slog.Error("failed to marshal tbyd-metadata SSE payload", "error", err)
-					} else {
-						fmt.Fprintf(w, "event: tbyd-metadata\ndata: %s\n\n", metaPayload)
-					}
-						flusher.Flush()
+						if err != nil {
+							slog.Error("failed to marshal tbyd-metadata SSE payload", "error", err)
+						} else {
+							fmt.Fprintf(w, "event: tbyd-metadata\ndata: %s\n\n", metaPayload)
+							flusher.Flush()
+						}
 					}
 				} else {
 					var chunk struct {
