@@ -100,8 +100,10 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 		return nil, nil
 	}
 
-	// Phase 1: scan only id + embedding to find top-K candidates.
-	rows, err := s.db.Query(`SELECT id, embedding FROM context_vectors`)
+	// Phase 1: scan id, embedding, and quality_score to find top-K candidates.
+	// quality_score is multiplied into the cosine similarity before heap insertion
+	// so that poor-quality chunks are downranked before the top-K cut.
+	rows, err := s.db.Query(`SELECT id, embedding, quality_score FROM context_vectors`)
 	if err != nil {
 		return nil, fmt.Errorf("querying vectors: %w", err)
 	}
@@ -121,7 +123,8 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 	for rows.Next() {
 		var id string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
+		var qualityScore float32
+		if err := rows.Scan(&id, &blob, &qualityScore); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
 
@@ -130,7 +133,7 @@ func (s *SQLiteStore) Search(table string, vector []float32, topK int, filter st
 			return nil, fmt.Errorf("decoding embedding for %s: %w", id, err)
 		}
 
-		score := cosineSimilarity(vector, buf, queryNorm)
+		score := cosineSimilarity(vector, buf, queryNorm) * qualityScore
 		if h.Len() < topK {
 			heap.Push(h, idScore{ID: id, Score: score})
 		} else if score > (*h)[0].Score {
@@ -209,7 +212,7 @@ func (s *SQLiteStore) ExportAll(table string) ([]Record, error) {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-		SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
+		SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags, quality_score
 		FROM context_vectors ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("querying all vectors: %w", err)
@@ -221,7 +224,7 @@ func (s *SQLiteStore) ExportAll(table string) ([]Record, error) {
 		var r Record
 		var blob []byte
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
+		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags, &r.QualityScore); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
 		embedding, err := decodeFloat32s(blob)
@@ -412,7 +415,8 @@ func (s *SQLiteStore) SearchKeyword(table string, query string, topK int, filter
 
 	results := make([]ScoredRecord, 0, len(records))
 	for _, r := range records {
-		results = append(results, ScoredRecord{Record: r, Score: normalizedScores[r.ID]})
+		score := normalizedScores[r.ID] * r.QualityScore
+		results = append(results, ScoredRecord{Record: r, Score: score})
 	}
 
 	sortByScore(results)
@@ -540,7 +544,7 @@ func (s *SQLiteStore) fetchRecordsByIDs(ctx context.Context, ids []string) ([]Re
 	for i, id := range ids {
 		queryArgs[i] = id
 	}
-	q := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags
+	q := `SELECT id, source_id, source_type, text_chunk, embedding, created_at, tags, quality_score
 		FROM context_vectors WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
 
 	rows, err := s.db.QueryContext(ctx, q, queryArgs...)
@@ -554,7 +558,7 @@ func (s *SQLiteStore) fetchRecordsByIDs(ctx context.Context, ids []string) ([]Re
 		var r Record
 		var blob []byte
 		var createdAt string
-		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags); err != nil {
+		if err := rows.Scan(&r.ID, &r.SourceID, &r.SourceType, &r.TextChunk, &blob, &createdAt, &r.Tags, &r.QualityScore); err != nil {
 			return nil, fmt.Errorf("scanning record: %w", err)
 		}
 		embedding, err := decodeFloat32s(blob)

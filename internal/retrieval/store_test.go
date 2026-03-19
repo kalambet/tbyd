@@ -27,7 +27,8 @@ func openTestDB(t *testing.T) *sql.DB {
 			text_chunk TEXT NOT NULL,
 			embedding BLOB NOT NULL,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			tags TEXT DEFAULT '[]'
+			tags TEXT DEFAULT '[]',
+			quality_score REAL NOT NULL DEFAULT 1.0
 		)`)
 	if err != nil {
 		t.Fatalf("creating table: %v", err)
@@ -545,5 +546,198 @@ func TestSearchHybrid_VectorOnlyFallback(t *testing.T) {
 	}
 	if results[0].ID != "r1" {
 		t.Errorf("ID = %q, want %q", results[0].ID, "r1")
+	}
+}
+
+// TestSearch_QualityScoreMultiplier verifies that two vectors with identical
+// embeddings are ranked by their quality_score: the higher-quality vector
+// comes first even though cosine similarity is the same.
+func TestSearch_QualityScoreMultiplier(t *testing.T) {
+	db := openTestDB(t)
+	s := NewSQLiteStore(db)
+
+	vec := makeTestVector(768, 0.5)
+	if err := s.Insert("context_vectors", []Record{
+		{
+			ID:         "high-quality",
+			SourceID:   "src1",
+			SourceType: "doc",
+			TextChunk:  "high quality chunk",
+			Embedding:  vec,
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+		{
+			ID:         "low-quality",
+			SourceID:   "src2",
+			SourceType: "doc",
+			TextChunk:  "low quality chunk",
+			Embedding:  vec, // identical embedding
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Degrade the low-quality vector.
+	if _, err := db.Exec(`UPDATE context_vectors SET quality_score = 0.5 WHERE id = 'low-quality'`); err != nil {
+		t.Fatalf("updating quality_score: %v", err)
+	}
+
+	results, err := s.Search("context_vectors", vec, 2, "")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].ID != "high-quality" {
+		t.Errorf("first result = %q, want %q", results[0].ID, "high-quality")
+	}
+	if results[1].ID != "low-quality" {
+		t.Errorf("second result = %q, want %q", results[1].ID, "low-quality")
+	}
+	// Verify the scores reflect the multiplier: high-quality score should be ~2x low-quality.
+	if results[0].Score <= results[1].Score {
+		t.Errorf("high-quality score %f should exceed low-quality score %f", results[0].Score, results[1].Score)
+	}
+}
+
+// TestSearch_QualityScoreDefault verifies that a vector inserted without an
+// explicit quality_score defaults to 1.0 and search results are unaffected.
+func TestSearch_QualityScoreDefault(t *testing.T) {
+	db := openTestDB(t)
+	s := NewSQLiteStore(db)
+
+	vec := makeTestVector(768, 0.3)
+	if err := s.Insert("context_vectors", []Record{{
+		ID:         "r1",
+		SourceID:   "src1",
+		SourceType: "doc",
+		TextChunk:  "default quality",
+		Embedding:  vec,
+		CreatedAt:  time.Now().UTC(),
+		Tags:       `[]`,
+	}}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	results, err := s.Search("context_vectors", vec, 1, "")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	// Score should be close to 1.0 (cosine of identical vector × quality_score 1.0).
+	if results[0].Score < 0.99 {
+		t.Errorf("score = %f, want > 0.99 (default quality_score 1.0 should not degrade score)", results[0].Score)
+	}
+	if results[0].QualityScore != 1.0 {
+		t.Errorf("QualityScore = %f, want 1.0 (default)", results[0].QualityScore)
+	}
+}
+
+// TestSearchHybrid_QualityScoreApplied verifies that a low quality_score
+// causes a vector to rank lower in hybrid search results.
+func TestSearchHybrid_QualityScoreApplied(t *testing.T) {
+	db := openTestDBWithFTS(t)
+	s := NewSQLiteStore(db)
+
+	// Use different embeddings and different text so the two docs are
+	// distinguishable by both vector and keyword search.
+	vecA := makeTestVector(768, 0.5)
+	vecB := makeTestVector(768, 0.3)
+	if err := s.Insert("context_vectors", []Record{
+		{
+			ID:         "normal",
+			SourceID:   "src1",
+			SourceType: "doc",
+			TextChunk:  "golang programming tutorial",
+			Embedding:  vecA,
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+		{
+			ID:         "degraded",
+			SourceID:   "src2",
+			SourceType: "doc",
+			TextChunk:  "golang programming guide",
+			Embedding:  vecB,
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Set a very low quality_score on the degraded vector.
+	if _, err := db.Exec(`UPDATE context_vectors SET quality_score = 0.3 WHERE id = 'degraded'`); err != nil {
+		t.Fatalf("updating quality_score: %v", err)
+	}
+
+	// Search with vecA — without quality adjustment, degraded could rank
+	// competitively via the keyword component. The quality multiplier should
+	// ensure "normal" (quality 1.0) outranks "degraded" (quality 0.3).
+	results, err := s.SearchHybrid("context_vectors", vecA, "golang", 2, 0.5, "")
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("got %d results, want at least 2", len(results))
+	}
+	if results[0].ID != "normal" {
+		t.Errorf("first result = %q, want %q (normal quality should rank first)", results[0].ID, "normal")
+	}
+}
+
+// TestSearchKeyword_QualityScoreApplied verifies that quality_score is
+// multiplied into normalized BM25 scores in keyword-only search.
+func TestSearchKeyword_QualityScoreApplied(t *testing.T) {
+	db := openTestDBWithFTS(t)
+	s := NewSQLiteStore(db)
+
+	vec := makeTestVector(768, 0.1)
+	if err := s.Insert("context_vectors", []Record{
+		{
+			ID:         "good",
+			SourceID:   "src1",
+			SourceType: "doc",
+			TextChunk:  "Kubernetes deployment strategies",
+			Embedding:  vec,
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+		{
+			ID:         "poor",
+			SourceID:   "src2",
+			SourceType: "doc",
+			TextChunk:  "Kubernetes deployment strategies",
+			Embedding:  vec,
+			CreatedAt:  time.Now().UTC(),
+			Tags:       `[]`,
+		},
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Degrade the poor vector's quality_score significantly.
+	if _, err := db.Exec(`UPDATE context_vectors SET quality_score = 0.2 WHERE id = 'poor'`); err != nil {
+		t.Fatalf("updating quality_score: %v", err)
+	}
+
+	results, err := s.SearchKeyword("context_vectors", "Kubernetes", 2, "")
+	if err != nil {
+		t.Fatalf("SearchKeyword: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+	if results[0].ID != "good" {
+		t.Errorf("first result = %q, want %q (good quality should rank first)", results[0].ID, "good")
+	}
+	if results[0].Score <= results[1].Score {
+		t.Errorf("good score %f should exceed poor score %f", results[0].Score, results[1].Score)
 	}
 }

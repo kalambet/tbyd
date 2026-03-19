@@ -182,3 +182,123 @@ func TestFeedback_IndexExists(t *testing.T) {
 		t.Error("index idx_interactions_feedback not found in sqlite_master")
 	}
 }
+
+// seedInteractionWithVectors saves an interaction with a specific vector_ids JSON array.
+func seedInteractionWithVectors(t *testing.T, store *storage.Store, id string, vectorIDs []string) {
+	t.Helper()
+	vectorIDsJSON := "[]"
+	if len(vectorIDs) > 0 {
+		b, err := json.Marshal(vectorIDs)
+		if err != nil {
+			t.Fatalf("marshaling vectorIDs: %v", err)
+		}
+		vectorIDsJSON = string(b)
+	}
+	err := store.SaveInteraction(context.Background(), storage.Interaction{
+		ID:        id,
+		CreatedAt: time.Now().UTC(),
+		UserQuery: "test query",
+		Status:    "completed",
+		VectorIDs: vectorIDsJSON,
+	})
+	if err != nil {
+		t.Fatalf("seedInteractionWithVectors(%q): %v", id, err)
+	}
+}
+
+// seedVector inserts a minimal vector into context_vectors with a default quality_score.
+func seedVector(t *testing.T, store *storage.Store, id string) {
+	t.Helper()
+	_, err := store.DB().Exec(
+		`INSERT INTO context_vectors (id, source_id, source_type, text_chunk, embedding, created_at, quality_score)
+		 VALUES (?, 'src', 'doc', 'text', X'00000000', datetime('now'), 1.0)`,
+		id,
+	)
+	if err != nil {
+		t.Fatalf("seedVector(%q): %v", id, err)
+	}
+}
+
+func TestFeedback_Negative_AdjustsQualityScores(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	seedInteractionWithVectors(t, store, "ix-adj-neg", []string{"vec-a", "vec-b"})
+	seedVector(t, store, "vec-a")
+	seedVector(t, store, "vec-b")
+
+	body := `{"score":-1}`
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/interactions/ix-adj-neg/feedback", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	for _, id := range []string{"vec-a", "vec-b"} {
+		var qs float64
+		err := store.DB().QueryRow(`SELECT quality_score FROM context_vectors WHERE id = ?`, id).Scan(&qs)
+		if err != nil {
+			t.Fatalf("querying quality_score for %s: %v", id, err)
+		}
+		want := 0.9
+		if qs < want-0.001 || qs > want+0.001 {
+			t.Errorf("vector %s: quality_score = %f, want %f after negative feedback", id, qs, want)
+		}
+	}
+}
+
+func TestFeedback_Positive_AdjustsQualityScores(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	seedInteractionWithVectors(t, store, "ix-adj-pos", []string{"vec-c"})
+	seedVector(t, store, "vec-c")
+
+	body := `{"score":1}`
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/interactions/ix-adj-pos/feedback", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var qs float64
+	err := store.DB().QueryRow(`SELECT quality_score FROM context_vectors WHERE id = 'vec-c'`).Scan(&qs)
+	if err != nil {
+		t.Fatalf("querying quality_score: %v", err)
+	}
+	want := 1.05
+	if qs < want-0.001 || qs > want+0.001 {
+		t.Errorf("quality_score = %f, want %f after positive feedback", qs, want)
+	}
+}
+
+func TestFeedback_NoVectorIDs_SkipsAdjustment(t *testing.T) {
+	h, store := setupAppHandler(t, testToken)
+
+	// Seed an interaction with empty vector_ids.
+	seedInteraction(t, store, "ix-no-vecs")
+
+	// Seed a vector that should NOT be touched.
+	seedVector(t, store, "untouched-vec")
+
+	body := `{"score":-1}`
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/interactions/ix-no-vecs/feedback", body, testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	// The unrelated vector's quality_score must be untouched.
+	var qs float64
+	err := store.DB().QueryRow(`SELECT quality_score FROM context_vectors WHERE id = 'untouched-vec'`).Scan(&qs)
+	if err != nil {
+		t.Fatalf("querying quality_score: %v", err)
+	}
+	if qs != 1.0 {
+		t.Errorf("quality_score = %f, want 1.0 (should be unaffected when vector_ids is empty)", qs)
+	}
+}

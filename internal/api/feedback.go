@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/kalambet/tbyd/internal/retrieval"
 	"github.com/kalambet/tbyd/internal/storage"
 )
 
@@ -59,8 +60,13 @@ func handleFeedback(deps AppDeps) http.HandlerFunc {
 
 var errNotesTooLong = fmt.Errorf("notes exceed maximum length")
 
-// saveFeedback validates notes length, persists the feedback, and enqueues
-// a feedback_extract job. Shared by the HTTP handler and MCP tool.
+// saveFeedback validates notes length, persists the feedback, enqueues
+// a feedback_extract job, and adjusts quality scores for the retrieved chunks.
+// Shared by the HTTP handler and MCP tool.
+//
+// Note: feedback persistence, job enqueue, and quality adjustment are not
+// transactional. A crash between steps may leave quality scores slightly off.
+// This is acceptable for a best-effort quality signal.
 func saveFeedback(ctx context.Context, store *storage.Store, id string, score int, notes string) error {
 	if len(notes) > maxFeedbackNotesLength {
 		return errNotesTooLong
@@ -74,6 +80,35 @@ func saveFeedback(ctx context.Context, store *storage.Store, id string, score in
 		slog.Error("feedback saved but failed to enqueue feedback_extract job",
 			"interaction_id", id, "error", err)
 	}
+
+	// Adjust quality scores for any vector chunks used in this interaction.
+	interaction, err := store.GetInteraction(id)
+	if err != nil {
+		slog.Warn("feedback: could not load interaction for quality adjustment",
+			"interaction_id", id, "error", err)
+		return nil
+	}
+
+	var vectorIDs []string
+	if interaction.VectorIDs != "" && interaction.VectorIDs != "[]" {
+		if err := json.Unmarshal([]byte(interaction.VectorIDs), &vectorIDs); err != nil {
+			slog.Debug("feedback: could not parse vector_ids JSON",
+				"interaction_id", id, "error", err)
+			return nil
+		}
+	}
+
+	if len(vectorIDs) > 0 {
+		positive := score == 1
+		if err := retrieval.AdjustQualityScores(store.DB(), vectorIDs, positive); err != nil {
+			slog.Error("feedback: failed to adjust quality scores",
+				"interaction_id", id, "vector_count", len(vectorIDs), "error", err)
+		} else {
+			slog.Debug("feedback: quality scores adjusted",
+				"interaction_id", id, "vector_count", len(vectorIDs), "positive", positive)
+		}
+	}
+
 	return nil
 }
 
