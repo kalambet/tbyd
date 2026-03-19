@@ -105,7 +105,7 @@ func saveFeedback(ctx context.Context, store *storage.Store, id string, score in
 				"interaction_id", id, "vector_count", len(vectorIDs), "error", err)
 		} else {
 			slog.Debug("feedback: quality scores adjusted",
-				"interaction_id", id, "vector_count", len(vectorIDs), "positive", positive)
+				"interaction_id", id, "vector_ids", vectorIDs, "positive", positive)
 		}
 	}
 
