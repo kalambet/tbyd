@@ -35,6 +35,7 @@ type InteractionSaver interface {
 
 // interactionRecord holds all data needed to persist an interaction.
 type interactionRecord struct {
+	InteractionID  string
 	UserQuery      string
 	EnrichedPrompt string
 	Model          string
@@ -162,6 +163,14 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 			return
 		}
 
+		// Generate interaction ID early so it can be surfaced in the response.
+		// Only generate when save is enabled — if interactions are not being saved,
+		// there is no ID to surface and no feedback to give.
+		var interactionID string
+		if saveCh != nil {
+			interactionID = uuid.New().String()
+		}
+
 		// Capture original user query before enrichment.
 		userQuery := extractLastUserMessage(req.Messages)
 
@@ -195,7 +204,7 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 		status := "completed"
 		if req.Stream {
 			var streamOK bool
-			responseBody, upstreamModel, streamOK = streamResponseCapture(w, rc)
+			responseBody, upstreamModel, streamOK = streamResponseCapture(w, rc, interactionID)
 			if !streamOK {
 				status = "aborted"
 			}
@@ -204,6 +213,11 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 			if err != nil {
 				httpError(w, http.StatusBadGateway, "api_error", "reading upstream response: %v", err)
 				return
+			}
+			// Set the interaction ID header before writing the body (headers must
+			// be set before the first Write call).
+			if interactionID != "" {
+				w.Header().Set("X-TBYD-Interaction-ID", interactionID)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(body)
@@ -226,6 +240,7 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 		// Enqueue interaction save via bounded channel (non-blocking).
 		if saveCh != nil && responseBody != "" {
 			rec := interactionRecord{
+				InteractionID:  interactionID,
 				UserQuery:      userQuery,
 				EnrichedPrompt: enrichedPrompt,
 				Model:          model,
@@ -285,7 +300,11 @@ func extractLastUserMessage(raw json.RawMessage) string {
 
 // doSaveInteraction persists an interaction and optionally enqueues a summarization job.
 func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interactionRecord, enqueueSummarize bool) {
-	interactionID := uuid.New().String()
+	interactionID := rec.InteractionID
+	if interactionID == "" {
+		slog.Warn("doSaveInteraction called with empty InteractionID; generating fallback UUID")
+		interactionID = uuid.New().String()
+	}
 	status := rec.Status
 	if status == "" {
 		status = "completed"
@@ -304,7 +323,7 @@ func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interact
 	if err := saver.SaveInteraction(ctx, interaction); err != nil {
 		slog.Error("failed to save interaction",
 			"error", err,
-			"ephemeral_id", interactionID,
+			"interaction_id", interactionID,
 			"model", rec.Model,
 		)
 		return
@@ -336,7 +355,11 @@ func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interact
 // model name extracted from SSE chunks, and whether the stream completed
 // successfully (received [DONE]). An incomplete stream returns false so the
 // caller can mark the interaction as aborted.
-func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string, bool) {
+//
+// When interactionID is non-empty, a custom SSE event is injected immediately
+// before the [DONE] sentinel so clients that handle "tbyd-metadata" events can
+// read the interaction ID without any change to clients that do not.
+func streamResponseCapture(w http.ResponseWriter, rc io.Reader, interactionID string) (string, string, bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, http.StatusInternalServerError, "api_error", "streaming not supported")
@@ -355,15 +378,22 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string,
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			w.Write(line)
-			flusher.Flush()
-
-			// Parse SSE data lines to extract delta content.
+			// Parse SSE data lines to extract delta content and intercept [DONE].
 			trimmed := strings.TrimSpace(string(line))
 			if strings.HasPrefix(trimmed, "data: ") {
 				data := strings.TrimPrefix(trimmed, "data: ")
 				if data == "[DONE]" {
 					streamDone = true
+					// Inject tbyd-metadata event before [DONE] when save is enabled.
+					if interactionID != "" {
+						metaPayload, err := json.Marshal(map[string]string{"interaction_id": interactionID})
+						if err != nil {
+							slog.Error("failed to marshal tbyd-metadata SSE payload", "error", err)
+						} else {
+							fmt.Fprintf(w, "event: tbyd-metadata\ndata: %s\n\n", metaPayload)
+							flusher.Flush()
+						}
+					}
 				} else {
 					var chunk struct {
 						Model   string `json:"model"`
@@ -385,6 +415,8 @@ func streamResponseCapture(w http.ResponseWriter, rc io.Reader) (string, string,
 					}
 				}
 			}
+			w.Write(line)
+			flusher.Flush()
 		}
 		if err != nil {
 			if err != io.EOF {
