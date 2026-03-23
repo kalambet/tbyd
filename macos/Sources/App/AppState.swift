@@ -79,7 +79,11 @@ final class AppState {
                 if self.isRunning {
                     if let deltas = try? await self.apiClient.listPendingDeltas() {
                         self.pendingDeltaCount = deltas.filter { $0.accepted == nil }.count
+                    } else {
+                        self.pendingDeltaCount = 0
                     }
+                } else {
+                    self.pendingDeltaCount = 0
                 }
                 try? await Task.sleep(for: .seconds(60))
             }

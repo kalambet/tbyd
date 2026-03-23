@@ -133,6 +133,30 @@ func TestRejectDelta(t *testing.T) {
 	}
 }
 
+func TestAcceptDelta_InvalidID(t *testing.T) {
+	h, _ := setupAppHandler(t, testToken)
+
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/profile/pending-deltas/bad!id@here/accept", "", testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestRejectDelta_InvalidID(t *testing.T) {
+	h, _ := setupAppHandler(t, testToken)
+
+	rr := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/profile/pending-deltas/bad!id@here/reject", "", testToken)
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
 func TestAcceptDelta_AlreadyReviewed(t *testing.T) {
 	h, store := setupAppHandler(t, testToken)
 	delta := savePendingDelta(t, store, "delta-dup-1", "nightly_synthesis")

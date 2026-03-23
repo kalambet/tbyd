@@ -1171,6 +1171,38 @@ func (s *Store) HasPendingJobOfType(ctx context.Context, jobType string) (bool, 
 	return exists, nil
 }
 
+// EnqueueJobIfNotExists atomically checks for an existing pending/running job
+// of the same type and inserts a new one only if none exists. Returns true if
+// the job was inserted, false if a duplicate was already present.
+func (s *Store) EnqueueJobIfNotExists(ctx context.Context, job Job) (bool, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	runAfter := now
+	if !job.RunAfter.IsZero() {
+		runAfter = job.RunAfter.UTC().Format(time.RFC3339)
+	}
+	maxAttempts := job.MaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = 3
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO jobs (id, type, payload_json, status, attempts, max_attempts, run_after, created_at, updated_at)
+		SELECT ?, ?, ?, 'pending', 0, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM jobs WHERE type = ? AND status IN ('pending', 'running')
+		)`,
+		job.ID, job.Type, job.PayloadJSON, maxAttempts, runAfter, now, now,
+		job.Type,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
 // HasPendingDeltaForSource reports whether an unreviewed delta from source
 // exists that was created at or after since. Used for deduplication.
 func (s *Store) HasPendingDeltaForSource(source string, since time.Time) (bool, error) {
