@@ -92,7 +92,7 @@ func saveFeedback(ctx context.Context, store *storage.Store, id string, score in
 	var vectorIDs []string
 	if interaction.VectorIDs != "" && interaction.VectorIDs != "[]" {
 		if err := json.Unmarshal([]byte(interaction.VectorIDs), &vectorIDs); err != nil {
-			slog.Debug("feedback: could not parse vector_ids JSON",
+			slog.Warn("feedback: could not parse vector_ids JSON",
 				"interaction_id", id, "error", err)
 			return nil
 		}

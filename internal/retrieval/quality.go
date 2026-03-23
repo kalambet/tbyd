@@ -29,7 +29,11 @@ func AdjustQualityScores(db *sql.DB, vectorIDs []string, positive bool) error {
 		delta = -0.1
 	}
 
-	placeholders := "?" + strings.Repeat(",?", len(vectorIDs)-1)
+	qmarks := make([]string, len(vectorIDs))
+	for i := range qmarks {
+		qmarks[i] = "?"
+	}
+	placeholders := strings.Join(qmarks, ",")
 	query := fmt.Sprintf(
 		`UPDATE context_vectors SET quality_score = MIN(2.0, MAX(0.1, quality_score + ?)) WHERE id IN (%s)`,
 		placeholders,
