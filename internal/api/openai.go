@@ -40,7 +40,8 @@ type interactionRecord struct {
 	EnrichedPrompt string
 	Model          string
 	CloudResponse  string
-	Status         string // "completed" or "aborted"
+	Status         string   // "completed" or "aborted"
+	ChunksUsed     []string // vector IDs used during enrichment; empty when enrichment is skipped
 }
 
 // interactionSaveLoop drains the save channel until ctx is cancelled,
@@ -175,9 +176,11 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 		userQuery := extractLastUserMessage(req.Messages)
 
 		// Enrich if enricher is available.
+		var chunksUsed []string
 		if enricher != nil {
 			enriched, meta := enricher.Enrich(r.Context(), req)
 			req = enriched
+			chunksUsed = meta.ChunksUsed
 			slog.Debug("request enriched",
 				"intent_extracted", meta.IntentExtracted,
 				"chunks_used", len(meta.ChunksUsed),
@@ -246,6 +249,7 @@ func handleChatCompletions(p *proxy.Client, enricher *pipeline.Enricher, saveCh 
 				Model:          model,
 				CloudResponse:  responseBody,
 				Status:         status,
+				ChunksUsed:     chunksUsed,
 			}
 			select {
 			case saveCh <- rec:
@@ -309,6 +313,15 @@ func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interact
 	if status == "" {
 		status = "completed"
 	}
+	vectorIDsJSON := "[]"
+	if len(rec.ChunksUsed) > 0 {
+		if b, err := json.Marshal(rec.ChunksUsed); err == nil {
+			vectorIDsJSON = string(b)
+		} else {
+			slog.Error("failed to marshal vector IDs", "error", err, "interaction_id", interactionID)
+		}
+	}
+
 	interaction := storage.Interaction{
 		ID:             interactionID,
 		CreatedAt:      time.Now().UTC(),
@@ -317,7 +330,7 @@ func doSaveInteraction(ctx context.Context, saver InteractionSaver, rec interact
 		CloudModel:     rec.Model,
 		CloudResponse:  rec.CloudResponse,
 		Status:         status,
-		VectorIDs:      "[]",
+		VectorIDs:      vectorIDsJSON,
 	}
 
 	if err := saver.SaveInteraction(ctx, interaction); err != nil {

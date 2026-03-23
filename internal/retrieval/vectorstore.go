@@ -59,13 +59,14 @@ type VectorStore interface {
 
 // Record represents a row in the vector store.
 type Record struct {
-	ID         string
-	SourceID   string
-	SourceType string
-	TextChunk  string
-	Embedding  []float32
-	CreatedAt  time.Time
-	Tags       string // JSON array stored as text
+	ID           string
+	SourceID     string
+	SourceType   string
+	TextChunk    string
+	Embedding    []float32
+	CreatedAt    time.Time
+	Tags         string  // JSON array stored as text
+	QualityScore float32 // retrieval quality multiplier; 1.0 by default, clamped to [0.1, 2.0]
 }
 
 // ScoredRecord is a Record with a similarity score attached.
