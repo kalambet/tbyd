@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -242,7 +243,7 @@ func TestFeedback_Negative_AdjustsQualityScores(t *testing.T) {
 			t.Fatalf("querying quality_score for %s: %v", id, err)
 		}
 		want := 0.9
-		if qs < want-0.001 || qs > want+0.001 {
+		if math.Abs(qs-want) > 1e-6 {
 			t.Errorf("vector %s: quality_score = %f, want %f after negative feedback", id, qs, want)
 		}
 	}
@@ -269,7 +270,7 @@ func TestFeedback_Positive_AdjustsQualityScores(t *testing.T) {
 		t.Fatalf("querying quality_score: %v", err)
 	}
 	want := 1.05
-	if qs < want-0.001 || qs > want+0.001 {
+	if math.Abs(qs-want) > 1e-6 {
 		t.Errorf("quality_score = %f, want %f after positive feedback", qs, want)
 	}
 }
