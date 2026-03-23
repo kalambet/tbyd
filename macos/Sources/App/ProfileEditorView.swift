@@ -33,10 +33,14 @@ struct ExpertiseEntry: Identifiable {
 struct ProfileEditorView: View {
     let appState: AppState
     @State private var viewModel = ProfileEditorViewModel()
+    @State private var showingPendingDeltas = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                if appState.pendingDeltaCount > 0 {
+                    pendingDeltasBanner
+                }
                 identitySection
                 communicationSection
                 interestsSection
@@ -51,6 +55,55 @@ struct ProfileEditorView: View {
         .task {
             await viewModel.load(client: appState.apiClient)
         }
+        .sheet(isPresented: $showingPendingDeltas) {
+            NavigationStack {
+                PendingDeltasView(appState: appState) {
+                    Task { await viewModel.load(client: appState.apiClient) }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { showingPendingDeltas = false }
+                    }
+                }
+            }
+            .frame(minWidth: 520, minHeight: 400)
+        }
+    }
+
+    // MARK: - Pending deltas banner
+
+    private var pendingDeltasBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Profile suggestions available")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text("\(appState.pendingDeltaCount) pending delta\(appState.pendingDeltaCount == 1 ? "" : "s") from nightly synthesis")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button("Review") {
+                showingPendingDeltas = true
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .accessibilityLabel("Review \(appState.pendingDeltaCount) pending profile delta\(appState.pendingDeltaCount == 1 ? "" : "s")")
+        }
+        .padding(10)
+        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(.orange.opacity(0.3), lineWidth: 1)
+        )
+        .padding(.bottom, 12)
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: - Identity section

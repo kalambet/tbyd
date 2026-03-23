@@ -238,10 +238,137 @@ var profileEditCmd = &cobra.Command{
 	},
 }
 
+var profileSynthesizeCmd = &cobra.Command{
+	Use:   "synthesize",
+	Short: "Trigger a nightly profile synthesis pass",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newAPIClient()
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.post(cmd.Context(), "/profile/synthesize", nil)
+		if err != nil {
+			return err
+		}
+
+		var result map[string]string
+		if err := decodeJSON(resp, &result); err != nil {
+			return err
+		}
+
+		if result["status"] == "already_queued" {
+			printSuccess("Synthesis job already queued")
+		} else {
+			printSuccess("Synthesis job queued")
+		}
+		return nil
+	},
+}
+
+var profilePendingDeltasCmd = &cobra.Command{
+	Use:   "pending-deltas",
+	Short: "List unreviewed profile deltas",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newAPIClient()
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.get(cmd.Context(), "/profile/pending-deltas")
+		if err != nil {
+			return err
+		}
+
+		var deltas []struct {
+			ID          string `json:"id"`
+			Source      string `json:"source"`
+			CreatedAt   string `json:"created_at"`
+			Description string `json:"description"`
+		}
+		if err := decodeJSON(resp, &deltas); err != nil {
+			return err
+		}
+
+		if len(deltas) == 0 {
+			fmt.Println("No pending deltas.")
+			return nil
+		}
+
+		for _, d := range deltas {
+			fmt.Printf("%s  %-20s  %s  %s\n",
+				colorize(colorCyan, d.ID),
+				d.Source,
+				d.CreatedAt,
+				d.Description,
+			)
+		}
+		return nil
+	},
+}
+
+var profilePendingDeltasAcceptCmd = &cobra.Command{
+	Use:   "accept <id>",
+	Short: "Accept a pending profile delta",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+
+		client, err := newAPIClient()
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.post(cmd.Context(), "/profile/pending-deltas/"+url.PathEscape(id)+"/accept", nil)
+		if err != nil {
+			return err
+		}
+
+		var result map[string]string
+		if err := decodeJSON(resp, &result); err != nil {
+			return err
+		}
+
+		printSuccess("Delta %s accepted", id)
+		return nil
+	},
+}
+
+var profilePendingDeltasRejectCmd = &cobra.Command{
+	Use:   "reject <id>",
+	Short: "Reject a pending profile delta",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+
+		client, err := newAPIClient()
+		if err != nil {
+			return err
+		}
+
+		resp, err := client.post(cmd.Context(), "/profile/pending-deltas/"+url.PathEscape(id)+"/reject", nil)
+		if err != nil {
+			return err
+		}
+
+		var result map[string]string
+		if err := decodeJSON(resp, &result); err != nil {
+			return err
+		}
+
+		printSuccess("Delta %s rejected", id)
+		return nil
+	},
+}
+
 func init() {
 	profileCmd.AddCommand(profileShowCmd)
 	profileCmd.AddCommand(profileSetCmd)
 	profileCmd.AddCommand(profileEditCmd)
+	profileCmd.AddCommand(profileSynthesizeCmd)
+	profilePendingDeltasCmd.AddCommand(profilePendingDeltasAcceptCmd)
+	profilePendingDeltasCmd.AddCommand(profilePendingDeltasRejectCmd)
+	profileCmd.AddCommand(profilePendingDeltasCmd)
 }
 
 // --- recall ---

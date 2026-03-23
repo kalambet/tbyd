@@ -5,11 +5,16 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/kalambet/tbyd/internal/profile"
 	"github.com/kalambet/tbyd/internal/storage"
 )
+
+// deltaIDRe validates delta ID path parameters: UUID-style or alphanumeric with
+// hyphens/underscores, max 64 characters.
+var deltaIDRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 func handleGetPendingDeltas(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -21,14 +26,17 @@ func handleGetPendingDeltas(deps AppDeps) http.HandlerFunc {
 		if deltas == nil {
 			deltas = []storage.PendingProfileDelta{}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(deltas)
+		writeJSON(w, deltas)
 	}
 }
 
 func handleAcceptDelta(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		if !deltaIDRe.MatchString(id) {
+			httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid delta id format")
+			return
+		}
 
 		// Atomically mark as accepted first to prevent TOCTOU races.
 		if err := deps.Store.ReviewDelta(id, true); err != nil {
@@ -74,14 +82,17 @@ func handleAcceptDelta(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+		writeJSON(w, map[string]string{"status": "accepted"})
 	}
 }
 
 func handleRejectDelta(deps AppDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
+		if !deltaIDRe.MatchString(id) {
+			httpError(w, http.StatusBadRequest, "invalid_request_error", "invalid delta id format")
+			return
+		}
 
 		if err := deps.Store.ReviewDelta(id, false); err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
@@ -96,7 +107,6 @@ func handleRejectDelta(deps AppDeps) http.HandlerFunc {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "rejected"})
+		writeJSON(w, map[string]string{"status": "rejected"})
 	}
 }

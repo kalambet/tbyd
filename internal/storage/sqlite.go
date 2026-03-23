@@ -1156,6 +1156,21 @@ func (s *Store) UnreviewDelta(id string) error {
 	return nil
 }
 
+// HasPendingJobOfType reports whether a job of the given type is currently
+// in the 'pending' or 'running' state. Used to prevent duplicate enqueues.
+func (s *Store) HasPendingJobOfType(ctx context.Context, jobType string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM jobs
+		WHERE type = ? AND status IN ('pending', 'running'))`,
+		jobType,
+	).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // HasPendingDeltaForSource reports whether an unreviewed delta from source
 // exists that was created at or after since. Used for deduplication.
 func (s *Store) HasPendingDeltaForSource(source string, since time.Time) (bool, error) {
