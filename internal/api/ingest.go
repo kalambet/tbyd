@@ -97,6 +97,7 @@ func NewAppHandler(deps AppDeps) http.Handler {
 	r.Get("/profile/pending-deltas", handleGetPendingDeltas(deps))
 	r.Post("/profile/pending-deltas/{id}/accept", handleAcceptDelta(deps))
 	r.Post("/profile/pending-deltas/{id}/reject", handleRejectDelta(deps))
+	r.Post("/profile/synthesize", handleTriggerSynthesis(deps))
 
 	return r
 }

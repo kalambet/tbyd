@@ -50,18 +50,18 @@ public actor APIClient {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let body = try encoder.encode(patch)
-        let _ = try await request("PATCH", path: "/profile", body: body)
+        try await request("PATCH", path: "/profile", body: body)
     }
 
     /// Sends a free-form PATCH with an arbitrary dictionary (used by PreferencesViewModel
     /// for non-profile-typed fields such as `save_interactions`).
     public func patchProfileRaw(_ fields: [String: Any]) async throws {
         let body = try JSONSerialization.data(withJSONObject: fields)
-        let _ = try await request("PATCH", path: "/profile", body: body)
+        try await request("PATCH", path: "/profile", body: body)
     }
 
     public func deleteProfileField(path fieldPath: String) async throws {
-        let _ = try await request("DELETE", path: "/profile/\(fieldPath)")
+        try await request("DELETE", path: "/profile/\(fieldPath)")
     }
 
     // MARK: - Interactions
@@ -140,7 +140,7 @@ public actor APIClient {
     }
 
     public func deleteInteraction(id: String) async throws {
-        let _ = try await request("DELETE", path: "/interactions/\(id)")
+        try await request("DELETE", path: "/interactions/\(id)")
     }
 
     public func postFeedback(interactionId: String, score: Int, notes: String?) async throws {
@@ -149,7 +149,7 @@ public actor APIClient {
             let notes: String?
         }
         let body = try JSONEncoder().encode(FeedbackBody(score: score, notes: notes))
-        let _ = try await request("POST", path: "/interactions/\(interactionId)/feedback", body: body)
+        try await request("POST", path: "/interactions/\(interactionId)/feedback", body: body)
     }
 
     // MARK: - Context Docs
@@ -174,7 +174,44 @@ public actor APIClient {
     }
 
     public func deleteContextDoc(id: String) async throws {
-        let _ = try await request("DELETE", path: "/context-docs/\(id)")
+        try await request("DELETE", path: "/context-docs/\(id)")
+    }
+
+    // MARK: - Pending Deltas
+
+    public struct PendingDelta: Decodable, Sendable, Identifiable {
+        public let id: String
+        public let deltaJSON: String
+        public let description: String
+        public let source: String
+        public let accepted: Bool?
+        public let reviewedAt: Date?
+        public let createdAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case deltaJSON = "delta_json"
+            case description
+            case source
+            case accepted
+            case reviewedAt = "reviewed_at"
+            case createdAt = "created_at"
+        }
+    }
+
+    public func listPendingDeltas() async throws -> [PendingDelta] {
+        let (data, _) = try await get("/profile/pending-deltas")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([PendingDelta].self, from: data)
+    }
+
+    public func acceptDelta(id: String) async throws {
+        try await request("POST", path: "/profile/pending-deltas/\(id)/accept")
+    }
+
+    public func rejectDelta(id: String) async throws {
+        try await request("POST", path: "/profile/pending-deltas/\(id)/reject")
     }
 
     // MARK: - Models

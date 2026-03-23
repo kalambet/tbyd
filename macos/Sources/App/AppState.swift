@@ -9,7 +9,9 @@ final class AppState {
     let processManager: ProcessManager
     let poller: StatusPoller
     var errorMessage: String?
+    var pendingDeltaCount: Int = 0
     private var terminationObserver: Any?
+    private var deltaPollingTask: Task<Void, Never>?
 
     init() {
         let token = try? KeychainService.get(.apiToken)
@@ -18,6 +20,7 @@ final class AppState {
         self.processManager = ProcessManager()
         self.poller = StatusPoller(client: client)
         poller.startPolling()
+        startDeltaPolling()
 
         let pm = processManager
         terminationObserver = NotificationCenter.default.addObserver(
@@ -66,6 +69,31 @@ final class AppState {
 
     var isRunning: Bool {
         poller.status == .running
+    }
+
+    private func startDeltaPolling() {
+        deltaPollingTask?.cancel()
+        deltaPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.isRunning {
+                    if let deltas = try? await self.apiClient.listPendingDeltas() {
+                        self.pendingDeltaCount = deltas.filter { $0.accepted == nil }.count
+                    } else {
+                        self.pendingDeltaCount = 0
+                    }
+                } else {
+                    self.pendingDeltaCount = 0
+                }
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    func refreshPendingDeltaCount() async {
+        if let deltas = try? await apiClient.listPendingDeltas() {
+            pendingDeltaCount = deltas.filter { $0.accepted == nil }.count
+        }
     }
 
     func startServer() {
